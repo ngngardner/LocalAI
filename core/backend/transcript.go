@@ -36,12 +36,13 @@ func ModelTranscription(audio, language string, translate, diarize bool, prompt 
 	}
 
 	r, err := transcriptionModel.AudioTranscription(context.Background(), &proto.TranscriptRequest{
-		Dst:       audio,
-		Language:  language,
-		Translate: translate,
-		Diarize:   diarize,
-		Threads:   uint32(*modelConfig.Threads),
-		Prompt:    prompt,
+		Dst:            audio,
+		Language:       language,
+		Translate:      translate,
+		Diarize:        diarize,
+		Threads:        uint32(*modelConfig.Threads),
+		Prompt:         prompt,
+		WordTimestamps: true,
 	})
 	if err != nil {
 		if appConfig.EnableTracing {
@@ -72,6 +73,15 @@ func ModelTranscription(audio, language string, translate, diarize bool, prompt 
 		for _, t := range s.Tokens {
 			tks = append(tks, int(t))
 		}
+		var words []schema.TranscriptionWord
+		for _, w := range s.Words {
+			words = append(words, schema.TranscriptionWord{
+				Start:       float64(w.Start) / 1e9,
+				End:         float64(w.End) / 1e9,
+				Word:        w.Word,
+				Probability: float64(w.Probability),
+			})
+		}
 		tr.Segments = append(tr.Segments,
 			schema.TranscriptionSegment{
 				Text:    s.Text,
@@ -80,6 +90,7 @@ func ModelTranscription(audio, language string, translate, diarize bool, prompt 
 				End:     time.Duration(s.End),
 				Tokens:  tks,
 				Speaker: s.Speaker,
+				Words:   words,
 			})
 	}
 

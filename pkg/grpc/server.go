@@ -159,6 +159,15 @@ func (s *server) AudioTranscription(ctx context.Context, in *pb.TranscriptReques
 		for _, t := range s.Tokens {
 			tks = append(tks, int32(t))
 		}
+		var words []*pb.TranscriptWord
+		for _, w := range s.Words {
+			words = append(words, &pb.TranscriptWord{
+				Start:       w.Start,
+				End:         w.End,
+				Word:        w.Word,
+				Probability: w.Probability,
+			})
+		}
 		tresult.Segments = append(tresult.Segments,
 			&pb.TranscriptSegment{
 				Text:   s.Text,
@@ -166,6 +175,7 @@ func (s *server) AudioTranscription(ctx context.Context, in *pb.TranscriptReques
 				Start:  int64(s.Start),
 				End:    int64(s.End),
 				Tokens: tks,
+				Words:  words,
 			})
 	}
 
