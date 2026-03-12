@@ -115,7 +115,7 @@ libgoacestepcpp-custom: CMakeLists.txt cpp/goacestepcpp.cpp cpp/goacestepcpp.h
 	mkdir -p build-$(SO_TARGET) && \
 	cd build-$(SO_TARGET) && \
 	cmake .. $(CMAKE_ARGS) && \
-	cmake --build . --config Release -j$(JOBS) && \
+	cmake --build . --config Release -j$(JOBS) --target goacestepcpp && \
 	cd .. && \
 	mv build-$(SO_TARGET)/libgoacestepcpp.so ./$(SO_TARGET)
 

@@ -5,7 +5,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(ACESTEP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/sources/acestep.cpp)
 
-add_subdirectory(${ACESTEP_DIR})
+# EXCLUDE_FROM_ALL: only build targets we explicitly depend on (acestep-core, ggml),
+# skip upstream standalone executables (ace-understand, dit-vae, etc.)
+add_subdirectory(${ACESTEP_DIR} acestep EXCLUDE_FROM_ALL)
 
 add_library(goacestepcpp MODULE cpp/goacestepcpp.cpp)
 target_link_libraries(goacestepcpp PRIVATE acestep-core ggml ggml-base ggml-cpu)
