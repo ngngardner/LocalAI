@@ -1,7 +1,5 @@
 package schema
 
-import "time"
-
 type TranscriptionWord struct {
 	Start       float64 `json:"start"`
 	End         float64 `json:"end"`
@@ -11,8 +9,8 @@ type TranscriptionWord struct {
 
 type TranscriptionSegment struct {
 	Id      int                `json:"id"`
-	Start   time.Duration      `json:"start"`
-	End     time.Duration      `json:"end"`
+	Start   float64            `json:"start"`
+	End     float64            `json:"end"`
 	Text    string             `json:"text"`
 	Tokens  []int              `json:"tokens"`
 	Speaker string             `json:"speaker,omitempty"`

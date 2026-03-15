@@ -98,7 +98,7 @@ func (t *TranscriptCMD) Run(ctx *cliContext.Context) error {
 		fmt.Println(string(mtr))
 	default:
 		for _, segment := range tr.Segments {
-			fmt.Println(segment.Start.String(), "-", strings.TrimSpace(segment.Text))
+			fmt.Printf("%.3fs - %s\n", segment.Start, strings.TrimSpace(segment.Text))
 		}
 	}
 	return nil

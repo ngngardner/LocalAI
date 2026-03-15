@@ -86,8 +86,8 @@ func ModelTranscription(audio, language string, translate, diarize bool, prompt 
 			schema.TranscriptionSegment{
 				Text:    s.Text,
 				Id:      int(s.Id),
-				Start:   time.Duration(s.Start),
-				End:     time.Duration(s.End),
+				Start:   float64(s.Start) / 1e9,
+				End:     float64(s.End) / 1e9,
 				Tokens:  tks,
 				Speaker: s.Speaker,
 				Words:   words,
