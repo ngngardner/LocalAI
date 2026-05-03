@@ -1,0 +1,35 @@
+# Build just the Go binary with proto changes
+FROM golang:1.26 AS builder
+
+RUN apt-get update && apt-get install -y protobuf-compiler unzip curl && rm -rf /var/lib/apt/lists/*
+
+# Install Go protobuf plugins
+RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@1958fcbe2ca8bd93af633f11e97d44e567e945af && \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.34.2
+
+WORKDIR /build
+COPY . .
+
+# Generate proto
+RUN mkdir -p pkg/grpc/proto && \
+    protoc --experimental_allow_proto3_optional \
+      -Ibackend/ \
+      --go_out=pkg/grpc/proto/ --go_opt=paths=source_relative \
+      --go-grpc_out=pkg/grpc/proto/ --go-grpc_opt=paths=source_relative \
+      backend/backend.proto
+
+# Create dummy react-ui dist for embed
+RUN mkdir -p core/http/react-ui/dist && touch core/http/react-ui/dist/.keep
+
+# Build just the main binary
+RUN CGO_ENABLED=0 go build -o /local-ai ./cmd/local-ai/
+
+# Layer patched binary + python backend onto existing image
+FROM localai/localai:latest-gpu-nvidia-cuda-12
+
+# Replace the Go binary
+COPY --from=builder /local-ai /local-ai
+
+# Patch the faster-whisper Python backend (will be applied after backend install)
+COPY backend/backend.proto /patched-backend.proto
+COPY backend/python/faster-whisper/backend.py /patched-backend.py
