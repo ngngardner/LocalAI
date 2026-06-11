@@ -203,10 +203,18 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
             # 5. Load on CPU in bf16 (8B bf16 = ~17GB, too large for a 12GB
             # card), quantize there, then move the shrunken model to the GPU.
+            # The published checkpoint is fp32 (~32GB); constructing the empty
+            # Model under a bf16 default dtype halves the anonymous-RAM peak
+            # (the safetensors state dict itself is mmap-backed, and
+            # load_state_dict casts fp32->bf16 as it copies).
             print(f"Loading MisoTTS from {source} on CPU (bf16)...", file=sys.stderr)
-            model = miso_generator._load_model(
-                source, MISO_TTS_8B_CONFIG, device="cpu", dtype=torch.bfloat16
-            )
+            torch.set_default_dtype(torch.bfloat16)
+            try:
+                model = miso_generator._load_model(
+                    source, MISO_TTS_8B_CONFIG, device="cpu", dtype=torch.bfloat16
+                )
+            finally:
+                torch.set_default_dtype(torch.float32)
 
             if quantize_mode in ("int8", "int4", "true"):
                 from torchao.quantization import quantize_, int8_weight_only, int4_weight_only
