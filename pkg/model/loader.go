@@ -269,7 +269,7 @@ func (ml *ModelLoader) checkIsLoaded(s string) *Model {
 	client := m.GRPC(false, ml.wd)
 
 	xlog.Debug("Checking model availability", "model", s)
-	cTimeout, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	cTimeout, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	alive, err := client.HealthCheck(cTimeout)
