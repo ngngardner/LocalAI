@@ -1,0 +1,13 @@
+torch
+torchaudio
+torchvision
+torchtune==0.4.0
+torchao==0.9.0
+transformers==4.57.0
+tokenizers==0.22.1
+einops==0.8.1
+accelerate==1.12.0
+vector-quantize-pytorch==1.27.15
+numpy==2.0.2
+tqdm
+heartlib @ https://github.com/HeartMuLa/heartlib/archive/refs/heads/main.tar.gz
