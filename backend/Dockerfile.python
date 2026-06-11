@@ -1,4 +1,6 @@
 ARG BASE_IMAGE=ubuntu:24.04
+ARG APT_MIRROR=""
+ARG APT_PORTS_MIRROR=""
 
 FROM ${BASE_IMAGE} AS builder
 ARG BACKEND=rerankers
@@ -13,8 +15,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETARCH
 ARG TARGETVARIANT
 ARG UBUNTU_VERSION=2404
+ARG APT_MIRROR
+ARG APT_PORTS_MIRROR
 
-RUN apt-get update && \
+RUN --mount=type=bind,source=.docker/apt-mirror.sh,target=/usr/local/sbin/apt-mirror \
+    APT_MIRROR="${APT_MIRROR}" APT_PORTS_MIRROR="${APT_PORTS_MIRROR}" sh /usr/local/sbin/apt-mirror && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
         ccache \
@@ -29,6 +35,7 @@ RUN apt-get update && \
         curl python3-pip \
         python-is-python3 \
         python3-dev llvm \
+        libnuma1 libgomp1 \
         python3-venv make cmake && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -161,6 +168,7 @@ RUN if [ "${BUILD_TYPE}" = "hipblas" ] && [ "${SKIP_DRIVERS}" = "false" ]; then 
         apt-get update && \
         apt-get install -y --no-install-recommends \
             hipblas-dev \
+            hipblaslt-dev \
             rocblas-dev && \
         apt-get clean && \
         rm -rf /var/lib/apt/lists/* && \
@@ -195,12 +203,30 @@ COPY backend/backend.proto /${BACKEND}/backend.proto
 COPY backend/python/common/ /${BACKEND}/common
 COPY scripts/build/package-gpu-libs.sh /package-gpu-libs.sh
 
+# Optional per-backend source build toggle (e.g. vllm on CPU can set
+# FROM_SOURCE=true to compile against the build host SIMD instead of
+# pulling a prebuilt wheel). Default empty — most backends ignore it.
+ARG FROM_SOURCE=""
+ENV FROM_SOURCE=${FROM_SOURCE}
+
+# Cache-buster for the per-backend `make` step. Most Python backends list
+# unpinned deps (torch, transformers, vllm, ...), so a warm registry cache
+# would otherwise freeze upstream versions indefinitely. CI passes a value
+# that rolls weekly so the install layer is rebuilt at most once per week
+# and picks up newer wheels from PyPI / nightly indexes.
+ARG DEPS_REFRESH=initial
+
 RUN cd /${BACKEND} && PORTABLE_PYTHON=true make
 
 # Package GPU libraries into the backend's lib directory
 RUN mkdir -p /${BACKEND}/lib && \
     TARGET_LIB_DIR="/${BACKEND}/lib" BUILD_TYPE="${BUILD_TYPE}" CUDA_MAJOR_VERSION="${CUDA_MAJOR_VERSION}" \
     bash /package-gpu-libs.sh "/${BACKEND}/lib"
+
+# Run backend-specific packaging if a package.sh exists
+RUN if [ -f "/${BACKEND}/package.sh" ]; then \
+        cd /${BACKEND} && bash package.sh; \
+    fi
 
 FROM scratch
 ARG BACKEND=rerankers

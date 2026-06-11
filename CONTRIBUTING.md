@@ -13,6 +13,7 @@ Thank you for your interest in contributing to LocalAI! We appreciate your time 
   - [Development Workflow](#development-workflow)
   - [Creating a Pull Request (PR)](#creating-a-pull-request-pr)
 - [Coding Guidelines](#coding-guidelines)
+- [AI Coding Assistants](#ai-coding-assistants)
 - [Testing](#testing)
 - [Documentation](#documentation)
 - [Community and Communication](#community-and-communication)
@@ -185,7 +186,7 @@ Before jumping into a PR for a massive feature or big change, it is preferred to
 
 This project uses an [`.editorconfig`](.editorconfig) file to define formatting standards (indentation, line endings, charset, etc.). Please configure your editor to respect it.
 
-For AI-assisted development, see [`CLAUDE.md`](CLAUDE.md) for agent-specific guidelines including build instructions and backend architecture details.
+For AI-assisted development, see [`AGENTS.md`](AGENTS.md) (or the equivalent [`CLAUDE.md`](CLAUDE.md) symlink) for agent-specific guidelines including build instructions and backend architecture details. Contributions produced with AI assistance must follow the rules in the [AI Coding Assistants](#ai-coding-assistants) section below.
 
 ### General Principles
 
@@ -197,6 +198,7 @@ For AI-assisted development, see [`CLAUDE.md`](CLAUDE.md) for agent-specific gui
 
 - Prefer modern Go idioms — for example, use `any` instead of `interface{}`.
 - Use [`golangci-lint`](https://golangci-lint.run) to catch common issues before submitting a PR.
+- Run `make install-hooks` once per clone to enable the pre-commit hook: Go changes run `make lint` + the coverage gate (`make test-coverage-check`); `core/http/react-ui/` changes run the Playwright e2e suite (`make test-ui`). Bypass a single commit with `git commit --no-verify`.
 - Use [`github.com/mudler/xlog`](https://github.com/mudler/xlog) for logging (same API as `slog`). Do not use `fmt.Println` or the standard `log` package for operational logging.
 - Use tab indentation for Go files (as defined in `.editorconfig`).
 
@@ -210,6 +212,26 @@ For AI-assisted development, see [`CLAUDE.md`](CLAUDE.md) for agent-specific gui
 - All contributions go through code review via pull requests.
 - Reviewers will check for correctness, test coverage, adherence to these guidelines, and clarity of intent.
 - Be responsive to review feedback and keep discussions constructive.
+
+## AI Coding Assistants
+
+LocalAI follows the **same guidelines as the Linux kernel project** for AI-assisted contributions: <https://docs.kernel.org/process/coding-assistants.html>.
+
+The full policy for this repository lives in [`.agents/ai-coding-assistants.md`](.agents/ai-coding-assistants.md). Summary:
+
+- **AI agents MUST NOT add `Signed-off-by` tags.** Only humans can certify the Developer Certificate of Origin.
+- **AI agents MUST NOT add `Co-Authored-By` trailers** attributing themselves as co-authors.
+- **Attribute AI involvement with an `Assisted-by` trailer** in the commit message:
+
+  ```
+  Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL1] [TOOL2]
+  ```
+
+  Example: `Assisted-by: Claude:claude-opus-4-7 golangci-lint`
+
+  Basic development tools (git, go, make, editors) should not be listed.
+- **The human submitter is responsible** for reviewing, testing, and fully understanding every line of AI-generated code — including verifying that any referenced APIs, flags, or file paths actually exist in the tree.
+- Contributions must remain compatible with LocalAI's **MIT License**.
 
 ## Testing
 
@@ -244,19 +266,22 @@ The e2e tests run LocalAI in a Docker container and exercise the API:
 make test-e2e
 ```
 
-### Running AIO tests
+### React UI tests and coverage
 
-All-In-One images have a set of tests that automatically verify that most of the endpoints work correctly:
+The React UI (`core/http/react-ui/`) is covered by Playwright e2e specs, gated by a **monotonic line-coverage ratchet** (`make test-ui-coverage-check`, run in CI and pre-commit). The metric is non-deterministic — a fast local box reads higher than a slow CI runner for the same code — so a small tolerance is unavoidable.
+
+**If your change lowers UI coverage, raise it back by adding specs — do not widen the tolerance or hand-lower the baseline.** A *render-smoke* spec (navigate to a page, assert its header is visible) cheaply covers an entire lazy page. See `core/http/react-ui/e2e/page-render-smoke.spec.js` and the full policy in [.agents/building-and-testing.md](.agents/building-and-testing.md#react-ui-coverage).
+
+### Running E2E container tests
+
+These tests build a standard LocalAI Docker image and run it with pre-configured model configs to verify that most endpoints work correctly:
 
 ```bash
 # Build the LocalAI docker image
-make DOCKER_IMAGE=local-ai docker
+make docker-build-e2e
 
-# Build the corresponding AIO image
-BASE_IMAGE=local-ai DOCKER_AIO_IMAGE=local-ai-aio:test make docker-aio
-
-# Run the AIO e2e tests
-LOCALAI_IMAGE_TAG=test LOCALAI_IMAGE=local-ai-aio make run-e2e-aio
+# Run the e2e tests (uses model configs from tests/e2e-aio/models/)
+make e2e-aio
 ```
 
 ### Testing backends

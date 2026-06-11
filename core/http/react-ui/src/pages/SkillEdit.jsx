@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useParams, useNavigate, useLocation, useOutletContext } from 'react-router-dom'
+import { useParams, useNavigate, useLocation, useOutletContext, useSearchParams } from 'react-router-dom'
 import { skillsApi } from '../utils/api'
 
 const RESOURCE_PREFIXES = ['scripts/', 'references/', 'assets/']
@@ -191,7 +191,7 @@ function ResourcesSection({ skillName, addToast }) {
                   value={editor.content}
                   onChange={(e) => setEditor((x) => ({ ...x, content: e.target.value }))}
                   rows={14}
-                  style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.875rem', marginBottom: 'var(--spacing-md)', width: '100%' }}
+                  style={{ fontFamily: 'var(--font-mono)', fontSize: '0.875rem', marginBottom: 'var(--spacing-md)', width: '100%' }}
                 />
                 <div style={{ display: 'flex', gap: 'var(--spacing-sm)', justifyContent: 'flex-end' }}>
                   <button className="btn btn-secondary" onClick={() => setEditor((e) => ({ ...e, open: false }))}>Cancel</button>
@@ -265,6 +265,8 @@ export default function SkillEdit() {
   const name = nameParam ? decodeURIComponent(nameParam) : undefined
   const navigate = useNavigate()
   const { addToast } = useOutletContext()
+  const [searchParams] = useSearchParams()
+  const userId = searchParams.get('user_id') || undefined
   const [loading, setLoading] = useState(!isNew)
   const [saving, setSaving] = useState(false)
   const [activeSection, setActiveSection] = useState('basic')
@@ -284,7 +286,7 @@ export default function SkillEdit() {
       return
     }
     if (name) {
-      skillsApi.get(name)
+      skillsApi.get(name, userId)
         .then((data) => {
           setForm({
             name: data.name || '',
@@ -298,7 +300,7 @@ export default function SkillEdit() {
         })
         .catch((err) => {
           addToast(err.message || 'Failed to load skill', 'error')
-          navigate('/skills')
+          navigate('/app/skills')
         })
         .finally(() => setLoading(false))
     }
@@ -329,10 +331,10 @@ export default function SkillEdit() {
         await skillsApi.create(payload)
         addToast('Skill created', 'success')
       } else {
-        await skillsApi.update(name, { ...payload, name: undefined })
+        await skillsApi.update(name, { ...payload, name: undefined }, userId)
         addToast('Skill updated', 'success')
       }
-      navigate('/skills')
+      navigate('/app/skills')
     } catch (err) {
       addToast(err.message || 'Save failed', 'error')
     } finally {
@@ -342,7 +344,7 @@ export default function SkillEdit() {
 
   if (loading) {
     return (
-      <div className="page" style={{ display: 'flex', justifyContent: 'center', padding: 'var(--spacing-xl)' }}>
+      <div className="page page--narrow" style={{ display: 'flex', justifyContent: 'center', padding: 'var(--spacing-xl)' }}>
         <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', color: 'var(--color-primary)' }} />
       </div>
     )
@@ -355,7 +357,7 @@ export default function SkillEdit() {
   ]
 
   return (
-    <div className="page" style={{ maxWidth: 960 }}>
+    <div className="page page--narrow">
       <style>{`
         .skilledit-back-link {
           display: inline-flex;
@@ -493,7 +495,7 @@ export default function SkillEdit() {
         }
       `}</style>
 
-      <a className="skilledit-back-link" onClick={() => navigate('/skills')}>
+      <a className="skilledit-back-link" onClick={() => navigate('/app/skills')}>
         <i className="fas fa-arrow-left" /> Back to skills
       </a>
       <div className="page-header">
@@ -592,7 +594,7 @@ export default function SkillEdit() {
                     value={form.content}
                     onChange={(e) => setForm((f) => ({ ...f, content: e.target.value }))}
                     rows={14}
-                    style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.875rem' }}
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: '0.875rem' }}
                   />
                 </div>
               </div>
@@ -613,7 +615,7 @@ export default function SkillEdit() {
               )}
 
               <div className="skilledit-form-actions">
-                <button type="button" className="btn btn-secondary" onClick={() => navigate('/skills')}>
+                <button type="button" className="btn btn-secondary" onClick={() => navigate('/app/skills')}>
                   <i className="fas fa-times" /> Cancel
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={saving}>

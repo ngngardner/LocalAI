@@ -6,10 +6,26 @@ url = '/basics/news/'
 icon = "newspaper"
 +++
 
-Release notes have been now moved completely over Github releases. 
+Release notes have been now moved completely over Github releases.
 
 You can see the release notes [here](https://github.com/mudler/LocalAI/releases).
 
+## 2026 Highlights
+
+- **April 2026**: [Audio Transform](/features/audio-transform/) — generic audio-in / audio-out endpoint with optional reference signal. First implementation: [LocalVQE](https://github.com/localai-org/LocalVQE) C++ backend (joint AEC + noise suppression + dereverberation, DeepVQE-style). Both batch (`POST /audio/transformations`) and bidirectional WebSocket streaming (`/audio/transformations/stream`). Studio "Transform" tab with synchronized waveform players for input / reference / output.
+- **April 2026**: [Face recognition backend](/features/face-recognition/) — `insightface`-powered 1:1 verification, 1:N identification, face embedding, face detection, and demographic analysis. Ships both a non-commercial `buffalo_l` model and an Apache 2.0 OpenCV Zoo alternative.
+- **May 2026**: [Speaker diarization](/features/audio-diarization/) — new `/v1/audio/diarization` endpoint returning "who spoke when" segments. Backed by `sherpa-onnx` (pyannote-3.0 + speaker embeddings + clustering) for pure diarization, and `vibevoice-cpp` for diarization bundled with long-form ASR. Supports `json` / `verbose_json` / `rttm` response formats.
+
+## 2024 Highlights
+
+- **April 2024**: [Reranker API](https://github.com/mudler/LocalAI/pull/2121)
+- **May 2024**: [Distributed inferencing](https://github.com/mudler/LocalAI/pull/2324), [Decentralized P2P llama.cpp](https://github.com/mudler/LocalAI/pull/2343) — [Docs](https://localai.io/features/distribute/)
+- **July/August 2024**: [P2P Dashboard, Federated mode and AI Swarms](https://github.com/mudler/LocalAI/pull/2723), [P2P Global community pools](https://github.com/mudler/LocalAI/issues/3113), FLUX-1 support, [P2P Explorer](https://explorer.localai.io)
+- **October 2024**: Examples moved to [LocalAI-examples](https://github.com/mudler/LocalAI-examples)
+- **November 2024**: [Voice Activity Detection (VAD)](https://github.com/mudler/LocalAI/pull/4204), [Bark.cpp backend](https://github.com/mudler/LocalAI/pull/4287)
+- **December 2024**: [stablediffusion.cpp backend (ggml)](https://github.com/mudler/LocalAI/pull/4289)
+
+---
 
 ## 04-12-2023: __v2.0.0__
 
@@ -89,7 +105,7 @@ It is now possible for single-devices with one GPU to specify `--single-active-b
 
 #### Resources management
 
-Thanks to the continous community efforts (another cool contribution from {{< github "dave-gray101" >}} ) now it's possible to shutdown a backend programmatically via the API.
+Thanks to the continuous community efforts (another cool contribution from {{< github "dave-gray101" >}} ) now it's possible to shutdown a backend programmatically via the API.
 There is an ongoing effort in the community to better handling of resources. See also the [🔥Roadmap](https://localai.io/#-hot-topics--roadmap).
 
 #### New how-to section

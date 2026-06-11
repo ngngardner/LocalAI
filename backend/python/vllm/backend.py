@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 import asyncio
+import dataclasses
+import difflib
 from concurrent import futures
 import argparse
 import signal
 import sys
 import os
+import json
+import time
+import gc
+import tempfile
 from typing import List
 from PIL import Image
 
@@ -12,6 +18,10 @@ import backend_pb2
 import backend_pb2_grpc
 
 import grpc
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'common'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'common'))
+from grpc_auth import get_auth_interceptors
+
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
@@ -21,6 +31,25 @@ from vllm.multimodal.utils import fetch_image
 from vllm.assets.video import VideoAsset
 import base64
 import io
+
+# Version-compat imports — wrap in try/except for older vLLM versions
+try:
+    from vllm.tool_parsers import ToolParserManager
+    HAS_TOOL_PARSERS = True
+except ImportError:
+    HAS_TOOL_PARSERS = False
+
+try:
+    from vllm.reasoning import ReasoningParserManager
+    HAS_REASONING_PARSERS = True
+except ImportError:
+    HAS_REASONING_PARSERS = False
+
+try:
+    from vllm.sampling_params import GuidedDecodingParams
+    HAS_GUIDED_DECODING = True
+except ImportError:
+    HAS_GUIDED_DECODING = False
 
 _ONE_DAY_IN_SECONDS = 60 * 60 * 24
 
@@ -64,6 +93,65 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             if token.item() == self.generator.tokenizer.eos_token_id:
                 break
         return decoded_text
+
+    def _parse_options(self, options_list):
+        """Parse Options[] key:value string list into a dict."""
+        opts = {}
+        for opt in options_list:
+            if ":" not in opt:
+                continue
+            key, value = opt.split(":", 1)
+            opts[key.strip()] = value.strip()
+        return opts
+
+    def _apply_engine_args(self, engine_args, engine_args_json):
+        """Apply user-supplied engine_args (JSON object) onto an AsyncEngineArgs.
+
+        Returns a new AsyncEngineArgs with the typed fields preserved and the
+        user's overrides layered on top. Uses ``dataclasses.replace`` so vLLM's
+        ``__post_init__`` re-runs and auto-converts dict-valued fields like
+        ``compilation_config`` / ``attention_config`` into their dataclass form.
+        ``speculative_config`` and ``kv_transfer_config`` are accepted as dicts
+        directly (vLLM converts them at engine init).
+
+        Unknown keys raise ValueError with the closest valid field as a hint.
+        """
+        if not engine_args_json:
+            return engine_args
+        try:
+            extra = json.loads(engine_args_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"engine_args is not valid JSON: {e}") from e
+        if not isinstance(extra, dict):
+            raise ValueError(
+                f"engine_args must be a JSON object, got {type(extra).__name__}"
+            )
+        valid = {f.name for f in dataclasses.fields(type(engine_args))}
+        for key in extra:
+            if key not in valid:
+                suggestion = difflib.get_close_matches(key, valid, n=1)
+                hint = f" did you mean {suggestion[0]!r}?" if suggestion else ""
+                raise ValueError(f"unknown engine_args key {key!r}.{hint}")
+        return dataclasses.replace(engine_args, **extra)
+
+    def _messages_to_dicts(self, messages):
+        """Convert proto Messages to list of dicts suitable for apply_chat_template()."""
+        result = []
+        for msg in messages:
+            d = {"role": msg.role, "content": msg.content or ""}
+            if msg.name:
+                d["name"] = msg.name
+            if msg.tool_call_id:
+                d["tool_call_id"] = msg.tool_call_id
+            if msg.reasoning_content:
+                d["reasoning_content"] = msg.reasoning_content
+            if msg.tool_calls:
+                try:
+                    d["tool_calls"] = json.loads(msg.tool_calls)
+                except json.JSONDecodeError:
+                    pass
+            result.append(d)
+        return result
 
     def Health(self, request, context):
         """
@@ -121,6 +209,15 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 "audio": max(request.LimitAudioPerPrompt, 1)
             }
 
+        # engine_args from YAML overrides typed fields above so operators can
+        # tune anything the AsyncEngineArgs dataclass exposes without waiting
+        # on protobuf changes.
+        try:
+            engine_args = self._apply_engine_args(engine_args, request.EngineArgs)
+        except ValueError as err:
+            print(f"engine_args error: {err}", file=sys.stderr)
+            return backend_pb2.Result(success=False, message=str(err))
+
         try:
             self.llm = AsyncLLMEngine.from_engine_args(engine_args)
         except Exception as err:
@@ -128,15 +225,49 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             return backend_pb2.Result(success=False, message=f"Unexpected {err=}, {type(err)=}")
 
         try:
-           engine_model_config = await self.llm.get_model_config()
-           self.tokenizer = get_tokenizer(
-               engine_model_config.tokenizer,
-               tokenizer_mode=engine_model_config.tokenizer_mode,
-               trust_remote_code=engine_model_config.trust_remote_code,
-               truncation_side="left",
-           )
+            # vLLM >= 0.14 removed get_model_config() on AsyncLLM; the tokenizer
+            # is either already loaded on the engine or can be built from the
+            # Model name directly.
+            tokenizer = None
+            if hasattr(self.llm, "get_tokenizer"):
+                try:
+                    tokenizer = await self.llm.get_tokenizer()
+                except TypeError:
+                    tokenizer = self.llm.get_tokenizer()
+                except Exception:
+                    tokenizer = None
+            if tokenizer is None and hasattr(self.llm, "tokenizer"):
+                tokenizer = self.llm.tokenizer
+            if tokenizer is None:
+                tokenizer = get_tokenizer(
+                    request.Model,
+                    trust_remote_code=bool(request.TrustRemoteCode),
+                    truncation_side="left",
+                )
+            self.tokenizer = tokenizer
         except Exception as err:
             return backend_pb2.Result(success=False, message=f"Unexpected {err=}, {type(err)=}")
+
+        # Parse options for parser selection
+        opts = self._parse_options(request.Options)
+
+        # Instantiate tool/reasoning parser classes (they'll be instantiated per-request with tokenizer)
+        self.tool_parser_cls = None
+        self.reasoning_parser_cls = None
+        if HAS_TOOL_PARSERS and opts.get("tool_parser"):
+            try:
+                self.tool_parser_cls = ToolParserManager.get_tool_parser(opts["tool_parser"])
+                print(f"Loaded tool_parser: {opts['tool_parser']}", file=sys.stderr)
+            except Exception as e:
+                print(f"Failed to load tool_parser {opts.get('tool_parser')}: {e}", file=sys.stderr)
+
+        if HAS_REASONING_PARSERS and opts.get("reasoning_parser"):
+            try:
+                self.reasoning_parser_cls = ReasoningParserManager.get_reasoning_parser(opts["reasoning_parser"])
+                print(f"Loaded reasoning_parser: {opts['reasoning_parser']}", file=sys.stderr)
+            except Exception as e:
+                print(f"Failed to load reasoning_parser {opts.get('reasoning_parser')}: {e}", file=sys.stderr)
+
         print("Model loaded successfully", file=sys.stderr)
         return backend_pb2.Result(message="Model loaded successfully", success=True)
 
@@ -193,6 +324,165 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         finally:
             await iterations.aclose()
 
+    async def TokenizeString(self, request, context):
+        if not hasattr(self, 'tokenizer') or self.tokenizer is None:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("Model/tokenizer not loaded")
+            return backend_pb2.TokenizationResponse()
+        try:
+            tokens = self.tokenizer.encode(request.Prompt)
+            return backend_pb2.TokenizationResponse(length=len(tokens), tokens=tokens)
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return backend_pb2.TokenizationResponse()
+
+    async def Free(self, request, context):
+        try:
+            if hasattr(self, 'llm'):
+                del self.llm
+            if hasattr(self, 'tokenizer'):
+                del self.tokenizer
+            self.tool_parser_cls = None
+            self.reasoning_parser_cls = None
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+            return backend_pb2.Result(success=True, message="Model freed")
+        except Exception as e:
+            return backend_pb2.Result(success=False, message=str(e))
+
+    async def Score(self, request, context):
+        """
+        Joint log-probability of each candidate continuation given the
+        shared prompt. Used by routing-policy multi-label classification
+        (read the distribution rather than asking the model to emit a
+        single argmax label), reranking, and reward-model scoring.
+
+        Implementation uses vLLM's `prompt_logprobs` to recover the
+        per-token log P(token_i | tokens_<i) for the full concatenated
+        sequence; the candidate's tokens are the suffix whose logprobs
+        get summed. max_tokens=1 because vLLM requires at least one
+        generated token; the generated token is discarded.
+        """
+        if not hasattr(self, 'llm') or self.llm is None:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("Model not loaded")
+            return backend_pb2.ScoreResponse()
+        if not hasattr(self, 'tokenizer') or self.tokenizer is None:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("Tokenizer not available")
+            return backend_pb2.ScoreResponse()
+        if len(request.candidates) == 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("candidates must be non-empty")
+            return backend_pb2.ScoreResponse()
+
+        try:
+            prompt = request.prompt or ""
+            prompt_token_ids = self.tokenizer.encode(prompt)
+            prompt_len = len(prompt_token_ids)
+            results = []
+
+            for candidate in request.candidates:
+                # Tokenise the concatenated sequence. We can't naively
+                # use len(prompt_tokens) + len(tokenizer.encode(candidate))
+                # because BPE merges at the boundary may produce a
+                # different tokenisation. Encoding the joined text and
+                # walking the divergence point is the correct primitive.
+                full_text = prompt + candidate
+                full_token_ids = self.tokenizer.encode(full_text)
+
+                divergence = prompt_len
+                min_len = min(prompt_len, len(full_token_ids))
+                for i in range(min_len):
+                    if prompt_token_ids[i] != full_token_ids[i]:
+                        divergence = i
+                        break
+
+                candidate_token_ids = full_token_ids[divergence:]
+                num_candidate_tokens = len(candidate_token_ids)
+                if num_candidate_tokens == 0:
+                    results.append(backend_pb2.CandidateScore(
+                        log_prob=0.0,
+                        length_normalized_log_prob=0.0,
+                        num_tokens=0,
+                    ))
+                    continue
+
+                sampling = SamplingParams(
+                    max_tokens=1,
+                    temperature=0.0,
+                    prompt_logprobs=1,
+                    detokenize=False,
+                )
+
+                request_id = random_uuid()
+                last_output = None
+                outputs_iter = self.llm.generate(
+                    {"prompt": full_text},
+                    sampling_params=sampling,
+                    request_id=request_id,
+                )
+                try:
+                    async for out in outputs_iter:
+                        last_output = out
+                finally:
+                    try:
+                        await outputs_iter.aclose()
+                    except Exception:
+                        pass
+
+                if last_output is None or not getattr(last_output, "prompt_logprobs", None):
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details("vLLM did not return prompt_logprobs")
+                    return backend_pb2.ScoreResponse()
+
+                prompt_logprobs = last_output.prompt_logprobs
+                total = 0.0
+                tokens_proto = []
+                for offset, tok_id in enumerate(candidate_token_ids):
+                    position = divergence + offset
+                    if position >= len(prompt_logprobs) or prompt_logprobs[position] is None:
+                        continue
+                    entry = prompt_logprobs[position]
+                    lp_obj = entry.get(tok_id)
+                    if lp_obj is not None:
+                        lp = lp_obj.logprob
+                    else:
+                        # Token not in top-K; vLLM's top-1 may miss it.
+                        # Fall back to the lowest available logprob in the
+                        # entry — a conservative lower-bound on the true
+                        # log P, biased against this candidate.
+                        lp = min(v.logprob for v in entry.values())
+                    total += lp
+                    if request.include_token_logprobs:
+                        tokens_proto.append(backend_pb2.TokenLogProb(
+                            token=self.tokenizer.decode([tok_id]),
+                            log_prob=lp,
+                        ))
+
+                cs = backend_pb2.CandidateScore(
+                    log_prob=total,
+                    num_tokens=num_candidate_tokens,
+                )
+                if request.length_normalize and num_candidate_tokens > 0:
+                    cs.length_normalized_log_prob = total / num_candidate_tokens
+                if tokens_proto:
+                    cs.tokens.extend(tokens_proto)
+                results.append(cs)
+
+            return backend_pb2.ScoreResponse(candidates=results)
+        except Exception as e:
+            print(f"Score error: {e}", file=sys.stderr)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return backend_pb2.ScoreResponse()
+
     async def _predict(self, request, context, streaming=False):
         # Build the sampling parameters
         # NOTE: this must stay in sync with the vllm backend
@@ -218,7 +508,6 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             "SkipSpecialTokens": "skip_special_tokens",
             "SpacesBetweenSpecialTokens": "spaces_between_special_tokens",
             "TruncatePromptTokens": "truncate_prompt_tokens",
-            "GuidedDecoding": "guided_decoding",
         }
 
         sampling_params = SamplingParams(top_p=0.9, max_tokens=200)
@@ -228,6 +517,14 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 value = getattr(request, request_field)
                 if value not in (None, 0, [], False):
                     setattr(sampling_params, param_field, value)
+
+        # Guided decoding: use Grammar field to pass JSON schema or BNF
+        if HAS_GUIDED_DECODING and request.Grammar:
+            try:
+                json.loads(request.Grammar)  # valid JSON = JSON schema
+                sampling_params.guided_decoding = GuidedDecodingParams(json=request.Grammar)
+            except json.JSONDecodeError:
+                sampling_params.guided_decoding = GuidedDecodingParams(grammar=request.Grammar)
 
         # Extract image paths and process images
         prompt = request.Prompt
@@ -240,7 +537,27 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
         # If tokenizer template is enabled and messages are provided instead of prompt, apply the tokenizer template
         if not request.Prompt and request.UseTokenizerTemplate and request.Messages:
-            prompt = self.tokenizer.apply_chat_template(request.Messages, tokenize=False, add_generation_prompt=True)
+            messages_dicts = self._messages_to_dicts(request.Messages)
+            template_kwargs = {"tokenize": False, "add_generation_prompt": True}
+
+            # Pass tools for tool calling
+            if request.Tools:
+                try:
+                    template_kwargs["tools"] = json.loads(request.Tools)
+                except json.JSONDecodeError:
+                    pass
+
+            # Enable thinking mode if requested
+            if request.Metadata.get("enable_thinking", "").lower() == "true":
+                template_kwargs["enable_thinking"] = True
+
+            try:
+                prompt = self.tokenizer.apply_chat_template(messages_dicts, **template_kwargs)
+            except TypeError:
+                # Some tokenizers don't support tools/enable_thinking kwargs — retry without them
+                prompt = self.tokenizer.apply_chat_template(
+                    messages_dicts, tokenize=False, add_generation_prompt=True
+                )
 
         # Generate text using the LLM engine
         request_id = random_uuid()
@@ -261,24 +578,25 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
 
         # Stream the results
         generated_text = ""
+        last_output = None
         try:
             async for request_output in outputs:
                 iteration_text = request_output.outputs[0].text
+                last_output = request_output
 
                 if streaming:
                     # Remove text already sent as vllm concatenates the text from previous yields
                     delta_iteration_text = iteration_text.removeprefix(generated_text)
                     # Send the partial result
-                    yield backend_pb2.Reply(message=bytes(delta_iteration_text, encoding='utf-8'))
+                    yield backend_pb2.Reply(
+                        message=bytes(delta_iteration_text, encoding='utf-8'),
+                        chat_deltas=[backend_pb2.ChatDelta(content=delta_iteration_text)],
+                    )
 
                 # Keep track of text generated
                 generated_text = iteration_text
         finally:
             await outputs.aclose()
-
-        # If streaming, we already sent everything
-        if streaming:
-            return
 
         # Remove the image files from /tmp folder
         for img_path in image_paths:
@@ -287,8 +605,99 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             except Exception as e:
                 print(f"Error removing image file: {img_path}, {e}", file=sys.stderr)
 
-        # Sending the final generated text
-        yield backend_pb2.Reply(message=bytes(generated_text, encoding='utf-8'))
+        # Parse reasoning and tool calls from final text using vLLM's native parsers
+        content = generated_text
+        reasoning_content = ""
+        tool_calls_proto = []
+
+        if self.reasoning_parser_cls:
+            try:
+                rp = self.reasoning_parser_cls(self.tokenizer)
+                r, c = rp.extract_reasoning(generated_text, request=None)
+                reasoning_content = r or ""
+                content = c if c is not None else generated_text
+            except Exception as e:
+                print(f"Reasoning parser error: {e}", file=sys.stderr)
+
+        if self.tool_parser_cls and request.Tools:
+            try:
+                tools = json.loads(request.Tools)
+                # Some concrete parsers only accept the tokenizer; only the
+                # abstract base declares the tools kwarg. Try with tools first,
+                # fall back to tokenizer-only.
+                try:
+                    tp = self.tool_parser_cls(self.tokenizer, tools=tools)
+                except TypeError:
+                    tp = self.tool_parser_cls(self.tokenizer)
+                info = tp.extract_tool_calls(content, request=None)
+                if info.tools_called:
+                    content = info.content or ""
+                    for i, tc in enumerate(info.tool_calls):
+                        tool_calls_proto.append(backend_pb2.ToolCallDelta(
+                            index=i,
+                            id=tc.id,
+                            name=tc.function.name,
+                            arguments=tc.function.arguments,
+                        ))
+            except Exception as e:
+                print(f"Tool parser error: {e}", file=sys.stderr)
+
+        # Extract token counts
+        prompt_tokens = 0
+        completion_tokens = 0
+        if last_output is not None:
+            try:
+                prompt_tokens = len(last_output.prompt_token_ids or [])
+            except Exception:
+                pass
+            try:
+                completion_tokens = len(last_output.outputs[0].token_ids or [])
+            except Exception:
+                pass
+
+        # Extract logprobs if requested
+        logprobs_bytes = b""
+        if last_output is not None and request.Logprobs > 0:
+            try:
+                lp = last_output.outputs[0].logprobs
+                if lp:
+                    logprobs_data = {"content": []}
+                    for token_lp_dict in lp:
+                        if token_lp_dict:
+                            first_tok_id, first_lp = next(iter(token_lp_dict.items()))
+                            logprobs_data["content"].append({
+                                "token": getattr(first_lp, "decoded_token", str(first_tok_id)),
+                                "logprob": first_lp.logprob,
+                            })
+                    logprobs_bytes = json.dumps(logprobs_data).encode("utf-8")
+            except Exception as e:
+                print(f"Logprobs extraction error: {e}", file=sys.stderr)
+
+        chat_delta = backend_pb2.ChatDelta(
+            content=content,
+            reasoning_content=reasoning_content,
+            tool_calls=tool_calls_proto,
+        )
+
+        if streaming:
+            # Final chunk with structured data
+            yield backend_pb2.Reply(
+                message=b"",
+                prompt_tokens=prompt_tokens,
+                tokens=completion_tokens,
+                chat_deltas=[chat_delta],
+                logprobs=logprobs_bytes,
+            )
+            return
+
+        # Non-streaming: single Reply with everything
+        yield backend_pb2.Reply(
+            message=bytes(content, encoding='utf-8'),
+            prompt_tokens=prompt_tokens,
+            tokens=completion_tokens,
+            chat_deltas=[chat_delta],
+            logprobs=logprobs_bytes,
+        )
 
     def load_image(self, image_path: str):
         """
@@ -321,7 +730,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         """
         try:
             timestamp = str(int(time.time() * 1000))  # Generate timestamp
-            p = f"/tmp/vl-{timestamp}.data"  # Use timestamp in filename
+            p = os.path.join(tempfile.gettempdir(), f"vl-{timestamp}.data")
             with open(p, "wb") as f:
                 f.write(base64.b64decode(video_path))
             video = VideoAsset(name=p).np_ndarrays
@@ -338,7 +747,9 @@ async def serve(address):
             ('grpc.max_message_length', 50 * 1024 * 1024),  # 50MB
             ('grpc.max_send_message_length', 50 * 1024 * 1024),  # 50MB
             ('grpc.max_receive_message_length', 50 * 1024 * 1024),  # 50MB
-        ])
+        ],
+        interceptors=get_auth_interceptors(aio=True),
+    )
     # Add the servicer to the server
     backend_pb2_grpc.add_BackendServicer_to_server(BackendServicer(), server)
     # Bind the server to the address

@@ -24,7 +24,6 @@ const docTemplate = `{
     "paths": {
         "/api/agent/jobs": {
             "get": {
-                "description": "Get a list of agent jobs, optionally filtered by task_id and status",
                 "produces": [
                     "application/json"
                 ],
@@ -47,14 +46,20 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Limit number of results",
+                        "description": "Max number of jobs to return",
                         "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Set to 'true' for admin cross-user listing",
+                        "name": "all_users",
                         "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
-                        "description": "List of jobs",
+                        "description": "jobs",
                         "schema": {
                             "type": "array",
                             "items": {
@@ -67,7 +72,6 @@ const docTemplate = `{
         },
         "/api/agent/jobs/execute": {
             "post": {
-                "description": "Create and execute a new agent job",
                 "consumes": [
                     "application/json"
                 ],
@@ -91,13 +95,13 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "201": {
-                        "description": "Job created",
+                        "description": "job created",
                         "schema": {
                             "$ref": "#/definitions/schema.JobExecutionResponse"
                         }
                     },
                     "400": {
-                        "description": "Invalid request",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -110,7 +114,6 @@ const docTemplate = `{
         },
         "/api/agent/jobs/{id}": {
             "get": {
-                "description": "Get an agent job by ID",
                 "produces": [
                     "application/json"
                 ],
@@ -129,13 +132,13 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Job details",
+                        "description": "job",
                         "schema": {
                             "$ref": "#/definitions/schema.Job"
                         }
                     },
                     "404": {
-                        "description": "Job not found",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -146,7 +149,6 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Delete an agent job by ID",
                 "produces": [
                     "application/json"
                 ],
@@ -165,7 +167,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Job deleted",
+                        "description": "message",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -174,7 +176,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "Job not found",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -187,7 +189,6 @@ const docTemplate = `{
         },
         "/api/agent/jobs/{id}/cancel": {
             "post": {
-                "description": "Cancel a running or pending agent job",
                 "produces": [
                     "application/json"
                 ],
@@ -206,7 +207,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Job cancelled",
+                        "description": "message",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -215,7 +216,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Job cannot be cancelled",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -224,7 +225,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "Job not found",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -237,17 +238,24 @@ const docTemplate = `{
         },
         "/api/agent/tasks": {
             "get": {
-                "description": "Get a list of all agent tasks",
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
                     "agent-jobs"
                 ],
-                "summary": "List all agent tasks",
+                "summary": "List agent tasks",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Set to 'true' for admin cross-user listing",
+                        "name": "all_users",
+                        "in": "query"
+                    }
+                ],
                 "responses": {
                     "200": {
-                        "description": "List of tasks",
+                        "description": "tasks",
                         "schema": {
                             "type": "array",
                             "items": {
@@ -258,7 +266,6 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Create a new reusable agent task with prompt template and configuration",
                 "consumes": [
                     "application/json"
                 ],
@@ -272,7 +279,7 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "description": "Task definition",
-                        "name": "task",
+                        "name": "request",
                         "in": "body",
                         "required": true,
                         "schema": {
@@ -282,7 +289,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "201": {
-                        "description": "Task created",
+                        "description": "id",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -291,16 +298,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Invalid request",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
-                        }
-                    },
-                    "500": {
-                        "description": "Internal server error",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -313,7 +311,6 @@ const docTemplate = `{
         },
         "/api/agent/tasks/{id}": {
             "get": {
-                "description": "Get an agent task by ID",
                 "produces": [
                     "application/json"
                 ],
@@ -332,13 +329,13 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Task details",
+                        "description": "task",
                         "schema": {
                             "$ref": "#/definitions/schema.Task"
                         }
                     },
                     "404": {
-                        "description": "Task not found",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -349,7 +346,6 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "Update an existing agent task",
                 "consumes": [
                     "application/json"
                 ],
@@ -370,7 +366,7 @@ const docTemplate = `{
                     },
                     {
                         "description": "Updated task definition",
-                        "name": "task",
+                        "name": "request",
                         "in": "body",
                         "required": true,
                         "schema": {
@@ -380,7 +376,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Task updated",
+                        "description": "message",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -389,7 +385,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Invalid request",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -398,7 +394,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "Task not found",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -409,7 +405,6 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Delete an agent task by ID",
                 "produces": [
                     "application/json"
                 ],
@@ -428,7 +423,7 @@ const docTemplate = `{
                 ],
                 "responses": {
                     "200": {
-                        "description": "Task deleted",
+                        "description": "message",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -437,7 +432,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "Task not found",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -450,7 +445,6 @@ const docTemplate = `{
         },
         "/api/agent/tasks/{name}/execute": {
             "post": {
-                "description": "Execute an agent task by its name (convenience endpoint). Parameters can be provided in the request body as a JSON object with string values.",
                 "consumes": [
                     "application/json"
                 ],
@@ -460,7 +454,7 @@ const docTemplate = `{
                 "tags": [
                     "agent-jobs"
                 ],
-                "summary": "Execute a task by name",
+                "summary": "Execute an agent task by name",
                 "parameters": [
                     {
                         "type": "string",
@@ -470,26 +464,23 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "description": "Template parameters (JSON object with string values)",
-                        "name": "request",
+                        "description": "Optional template parameters",
+                        "name": "parameters",
                         "in": "body",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "type": "object"
                         }
                     }
                 ],
                 "responses": {
                     "201": {
-                        "description": "Job created",
+                        "description": "job created",
                         "schema": {
                             "$ref": "#/definitions/schema.JobExecutionResponse"
                         }
                     },
                     "400": {
-                        "description": "Invalid request",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -498,7 +489,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "Task not found",
+                        "description": "error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -509,8 +500,597 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/backend-logs": {
+            "get": {
+                "description": "Returns a sorted list of model IDs that have captured backend process output",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "List models with backend logs",
+                "responses": {
+                    "200": {
+                        "description": "Model IDs with logs",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/backend-logs/{modelId}": {
+            "get": {
+                "description": "Returns all captured log lines (stdout/stderr) for the specified model's backend process",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "Get backend logs for a model",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Model ID",
+                        "name": "modelId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Log lines",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/model.BackendLogLine"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/backend-logs/{modelId}/clear": {
+            "post": {
+                "description": "Removes all captured log lines for the specified model's backend process",
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "Clear backend logs for a model",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Model ID",
+                        "name": "modelId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "Logs cleared"
+                    }
+                }
+            }
+        },
+        "/api/backend-traces": {
+            "get": {
+                "description": "Returns captured backend traces (LLM calls, embeddings, TTS, etc.) in reverse chronological order",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "List backend operation traces",
+                "responses": {
+                    "200": {
+                        "description": "Backend operation traces",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/backend-traces/clear": {
+            "post": {
+                "description": "Removes all captured backend operation traces from the buffer",
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "Clear backend traces",
+                "responses": {
+                    "204": {
+                        "description": "Traces cleared"
+                    }
+                }
+            }
+        },
+        "/api/branding": {
+            "get": {
+                "description": "Returns the configured instance name, tagline, and asset URLs. Public — no authentication required.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "branding"
+                ],
+                "summary": "Get instance branding",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.BrandingResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/branding/asset/{kind}": {
+            "post": {
+                "description": "Upload a custom logo, horizontal logo, or favicon. The file replaces any previous override for that kind.",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "branding"
+                ],
+                "summary": "Upload a branding asset",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Asset kind: logo, logo_horizontal, or favicon",
+                        "name": "kind",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "file",
+                        "description": "Image file (png, jpeg, svg, webp, ico — up to 5MiB)",
+                        "name": "file",
+                        "in": "formData",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.BrandingResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Remove a custom branding asset; the UI falls back to the bundled LocalAI default.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "branding"
+                ],
+                "summary": "Reset a branding asset to default",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Asset kind: logo, logo_horizontal, or favicon",
+                        "name": "kind",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.BrandingResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/instructions": {
+            "get": {
+                "description": "Returns a compact list of instruction areas with descriptions and URLs for detailed guides",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "instructions"
+                ],
+                "summary": "List available API instruction areas",
+                "responses": {
+                    "200": {
+                        "description": "instructions list with hint",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/instructions/{name}": {
+            "get": {
+                "description": "Returns a markdown guide (default) or filtered OpenAPI fragment (format=json) for a named instruction",
+                "produces": [
+                    "application/json",
+                    "text/markdown"
+                ],
+                "tags": [
+                    "instructions"
+                ],
+                "summary": "Get an instruction's API guide or OpenAPI fragment",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Instruction name (e.g. chat-inference, config-management)",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Response format: json for OpenAPI fragment, omit for markdown",
+                        "name": "format",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "instruction documentation",
+                        "schema": {
+                            "$ref": "#/definitions/localai.APIInstructionResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "instruction not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/config-json/{name}": {
+            "patch": {
+                "description": "Deep-merges the JSON patch body into the existing model config",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "config"
+                ],
+                "summary": "Partially update a model configuration",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Model name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "success message",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/config-metadata": {
+            "get": {
+                "description": "Returns config field metadata. Use ?section=\u003cid\u003e to filter by section, or omit for a section index.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "config"
+                ],
+                "summary": "List model configuration field metadata",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Section ID to filter (e.g. 'general', 'llm', 'parameters') or 'all' for everything",
+                        "name": "section",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Section index or filtered field metadata",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/config-metadata/autocomplete/{provider}": {
+            "get": {
+                "description": "Returns runtime-resolved values for dynamic providers (backends, models)",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "config"
+                ],
+                "summary": "Get dynamic autocomplete values for a config field",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider name (backends, models, models:chat, models:tts, models:transcript, models:vad)",
+                        "name": "provider",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "values array",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/toggle-pinned/{name}/{action}": {
+            "put": {
+                "description": "Pin or unpin a model. Pinned models stay loaded and are excluded from automatic eviction.",
+                "tags": [
+                    "config"
+                ],
+                "summary": "Toggle model pinned status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Model name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Action: 'pin' or 'unpin'",
+                        "name": "action",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/vram-estimate": {
+            "post": {
+                "description": "Estimates VRAM based on model weight files at multiple context sizes",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "config"
+                ],
+                "summary": "Estimate VRAM usage for a model",
+                "parameters": [
+                    {
+                        "description": "VRAM estimation parameters",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/modeladmin.VRAMRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "VRAM estimate",
+                        "schema": {
+                            "$ref": "#/definitions/modeladmin.VRAMResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/models/{name}/{action}": {
+            "put": {
+                "description": "Enable or disable a model from being loaded on demand. Disabled models remain installed but cannot be loaded.",
+                "tags": [
+                    "config"
+                ],
+                "summary": "Toggle model enabled/disabled status",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Model name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Action: 'enable' or 'disable'",
+                        "name": "action",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/localai.ModelResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/nodes/{id}/max-replicas-per-model": {
+            "put": {
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Update a node's max replicas per model",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Node ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "New value",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/localai.UpdateMaxReplicasPerModelRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "integer"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "value must be \u003e= 1",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "node not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "Nodes"
+                ],
+                "summary": "Reset a node's max replicas per model to the worker default",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Node ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "boolean"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "node not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/api/p2p": {
             "get": {
+                "tags": [
+                    "p2p"
+                ],
                 "summary": "Returns available P2P nodes",
                 "responses": {
                     "200": {
@@ -527,6 +1107,9 @@ const docTemplate = `{
         },
         "/api/p2p/token": {
             "get": {
+                "tags": [
+                    "p2p"
+                ],
                 "summary": "Show the P2P token",
                 "responses": {
                     "200": {
@@ -538,18 +1121,289 @@ const docTemplate = `{
                 }
             }
         },
-        "/backend/monitor": {
-            "get": {
-                "summary": "Backend monitor endpoint",
+        "/api/pii/decide": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pii"
+                ],
+                "summary": "Scan text for PII and return findings + suggested action (decision oracle)",
                 "parameters": [
                     {
-                        "description": "Backend statistics request",
+                        "description": "decide params",
                         "name": "request",
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/schema.BackendMonitorRequest"
+                            "$ref": "#/definitions/schema.PIIDecideRequest"
                         }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/schema.PIIDecideResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/router/decide": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "router"
+                ],
+                "summary": "Classify a prompt against a router model's policies (decision oracle)",
+                "parameters": [
+                    {
+                        "description": "decide params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.RouterDecideRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/schema.RouterDecideResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/traces": {
+            "get": {
+                "description": "Returns captured API exchange traces (request/response pairs) in reverse chronological order",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "List API request/response traces",
+                "responses": {
+                    "200": {
+                        "description": "Traced API exchanges",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/traces/clear": {
+            "post": {
+                "description": "Removes all captured API request/response traces from the buffer",
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "Clear API traces",
+                "responses": {
+                    "204": {
+                        "description": "Traces cleared"
+                    }
+                }
+            }
+        },
+        "/audio/transform": {
+            "post": {
+                "description": "Runs an audio-in / audio-out transform conditioned on an optional auxiliary reference signal. Concrete transforms include AEC + noise suppression + dereverberation (LocalVQE), voice conversion (reference = target speaker), and pitch shifting. The backend determines the operation; pass model-specific tuning via repeated ` + "`" + `params[\u003ckey\u003e]=\u003cvalue\u003e` + "`" + ` form fields.",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "audio/x-wav"
+                ],
+                "tags": [
+                    "audio"
+                ],
+                "summary": "Transform audio (echo cancellation, noise suppression, voice conversion, etc.)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "model",
+                        "name": "model",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "file",
+                        "description": "primary input audio file",
+                        "name": "audio",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "file",
+                        "description": "auxiliary reference audio (loopback for AEC, target voice for conversion, etc.)",
+                        "name": "reference",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "string",
+                        "description": "wav | mp3 | ogg | flac",
+                        "name": "response_format",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "desired output sample rate",
+                        "name": "sample_rate",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "transformed audio file",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/audio/transformations": {
+            "post": {
+                "description": "Runs an audio-in / audio-out transform conditioned on an optional auxiliary reference signal. Concrete transforms include AEC + noise suppression + dereverberation (LocalVQE), voice conversion (reference = target speaker), and pitch shifting. The backend determines the operation; pass model-specific tuning via repeated ` + "`" + `params[\u003ckey\u003e]=\u003cvalue\u003e` + "`" + ` form fields.",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "audio/x-wav"
+                ],
+                "tags": [
+                    "audio"
+                ],
+                "summary": "Transform audio (echo cancellation, noise suppression, voice conversion, etc.)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "model",
+                        "name": "model",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "file",
+                        "description": "primary input audio file",
+                        "name": "audio",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "file",
+                        "description": "auxiliary reference audio (loopback for AEC, target voice for conversion, etc.)",
+                        "name": "reference",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "string",
+                        "description": "wav | mp3 | ogg | flac",
+                        "name": "response_format",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "desired output sample rate",
+                        "name": "sample_rate",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "transformed audio file",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/audio/transformations/stream": {
+            "get": {
+                "description": "Streams binary PCM frames in (interleaved stereo: ch0=audio, ch1=reference) and out (mono). The first message must be a JSON ` + "`" + `session.update` + "`" + ` envelope describing model + sample format + frame size + backend params. Server emits binary PCM on the same cadence.",
+                "tags": [
+                    "audio"
+                ],
+                "summary": "Bidirectional realtime audio transform over WebSocket.",
+                "responses": {}
+            }
+        },
+        "/backend/monitor": {
+            "get": {
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "Backend monitor endpoint",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Name of the model to monitor",
+                        "name": "model",
+                        "in": "query",
+                        "required": true
                     }
                 ],
                 "responses": {
@@ -564,7 +1418,10 @@ const docTemplate = `{
         },
         "/backend/shutdown": {
             "post": {
-                "summary": "Backend monitor endpoint",
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "Backend shutdown endpoint",
                 "parameters": [
                     {
                         "description": "Backend statistics request",
@@ -581,6 +1438,9 @@ const docTemplate = `{
         },
         "/backends": {
             "get": {
+                "tags": [
+                    "backends"
+                ],
                 "summary": "List all Backends",
                 "responses": {
                     "200": {
@@ -597,6 +1457,9 @@ const docTemplate = `{
         },
         "/backends/apply": {
             "post": {
+                "tags": [
+                    "backends"
+                ],
                 "summary": "Install backends to LocalAI.",
                 "parameters": [
                     {
@@ -621,6 +1484,9 @@ const docTemplate = `{
         },
         "/backends/available": {
             "get": {
+                "tags": [
+                    "backends"
+                ],
                 "summary": "List all available Backends",
                 "responses": {
                     "200": {
@@ -637,6 +1503,9 @@ const docTemplate = `{
         },
         "/backends/delete/{name}": {
             "post": {
+                "tags": [
+                    "backends"
+                ],
                 "summary": "delete backends from LocalAI.",
                 "parameters": [
                     {
@@ -659,6 +1528,9 @@ const docTemplate = `{
         },
         "/backends/galleries": {
             "get": {
+                "tags": [
+                    "backends"
+                ],
                 "summary": "List all Galleries",
                 "responses": {
                     "200": {
@@ -675,6 +1547,9 @@ const docTemplate = `{
         },
         "/backends/jobs": {
             "get": {
+                "tags": [
+                    "backends"
+                ],
                 "summary": "Returns all the jobs status progress",
                 "responses": {
                     "200": {
@@ -682,7 +1557,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
-                                "$ref": "#/definitions/services.GalleryOpStatus"
+                                "$ref": "#/definitions/galleryop.OpStatus"
                             }
                         }
                     }
@@ -691,36 +1566,155 @@ const docTemplate = `{
         },
         "/backends/jobs/{uuid}": {
             "get": {
+                "tags": [
+                    "backends"
+                ],
                 "summary": "Returns the job status",
                 "responses": {
                     "200": {
                         "description": "Response",
                         "schema": {
-                            "$ref": "#/definitions/services.GalleryOpStatus"
+                            "$ref": "#/definitions/galleryop.OpStatus"
                         }
+                    }
+                }
+            }
+        },
+        "/backends/known": {
+            "get": {
+                "tags": [
+                    "backends"
+                ],
+                "summary": "List all known Backends (importer registry + curated pref-only + installed-on-disk)",
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/schema.KnownBackend"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/backends/upgrade/{name}": {
+            "post": {
+                "tags": [
+                    "backends"
+                ],
+                "summary": "Upgrade a backend",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Backend name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.BackendResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/backends/upgrades": {
+            "get": {
+                "tags": [
+                    "backends"
+                ],
+                "summary": "Get available backend upgrades",
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "$ref": "#/definitions/gallery.UpgradeInfo"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/backends/upgrades/check": {
+            "post": {
+                "tags": [
+                    "backends"
+                ],
+                "summary": "Force backend upgrade check",
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "$ref": "#/definitions/gallery.UpgradeInfo"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/branding/asset/{kind}": {
+            "get": {
+                "description": "Serves the admin-uploaded logo, horizontal logo, or favicon. 404 when no override is set.",
+                "produces": [
+                    "image/*"
+                ],
+                "tags": [
+                    "branding"
+                ],
+                "summary": "Serve a custom branding asset",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Asset kind: logo, logo_horizontal, or favicon",
+                        "name": "kind",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "404": {
+                        "description": "Not Found"
                     }
                 }
             }
         },
         "/metrics": {
             "get": {
+                "produces": [
+                    "text/plain"
+                ],
+                "tags": [
+                    "monitoring"
+                ],
                 "summary": "Prometheus metrics endpoint",
-                "parameters": [
-                    {
-                        "description": "Gallery details",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
+                "responses": {
+                    "200": {
+                        "description": "Prometheus metrics",
                         "schema": {
-                            "$ref": "#/definitions/config.Gallery"
+                            "type": "string"
                         }
                     }
-                ],
-                "responses": {}
+                }
             }
         },
         "/models/apply": {
             "post": {
+                "tags": [
+                    "models"
+                ],
                 "summary": "Install models to LocalAI.",
                 "parameters": [
                     {
@@ -745,6 +1739,9 @@ const docTemplate = `{
         },
         "/models/available": {
             "get": {
+                "tags": [
+                    "models"
+                ],
                 "summary": "List installable models.",
                 "responses": {
                     "200": {
@@ -752,7 +1749,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/gallery.GalleryModel"
+                                "$ref": "#/definitions/gallery.Metadata"
                             }
                         }
                     }
@@ -761,6 +1758,9 @@ const docTemplate = `{
         },
         "/models/delete/{name}": {
             "post": {
+                "tags": [
+                    "models"
+                ],
                 "summary": "delete models to LocalAI.",
                 "parameters": [
                     {
@@ -783,6 +1783,9 @@ const docTemplate = `{
         },
         "/models/galleries": {
             "get": {
+                "tags": [
+                    "models"
+                ],
                 "summary": "List all Galleries",
                 "responses": {
                     "200": {
@@ -799,6 +1802,9 @@ const docTemplate = `{
         },
         "/models/jobs": {
             "get": {
+                "tags": [
+                    "models"
+                ],
                 "summary": "Returns all the jobs status progress",
                 "responses": {
                     "200": {
@@ -806,7 +1812,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
-                                "$ref": "#/definitions/services.GalleryOpStatus"
+                                "$ref": "#/definitions/galleryop.OpStatus"
                             }
                         }
                     }
@@ -815,12 +1821,15 @@ const docTemplate = `{
         },
         "/models/jobs/{uuid}": {
             "get": {
+                "tags": [
+                    "models"
+                ],
                 "summary": "Returns the job status",
                 "responses": {
                     "200": {
                         "description": "Response",
                         "schema": {
-                            "$ref": "#/definitions/services.GalleryOpStatus"
+                            "$ref": "#/definitions/galleryop.OpStatus"
                         }
                     }
                 }
@@ -828,6 +1837,9 @@ const docTemplate = `{
         },
         "/system": {
             "get": {
+                "tags": [
+                    "monitoring"
+                ],
                 "summary": "Show the LocalAI instance information",
                 "responses": {
                     "200": {
@@ -847,6 +1859,9 @@ const docTemplate = `{
                 "produces": [
                     "audio/x-wav"
                 ],
+                "tags": [
+                    "tokenize"
+                ],
                 "summary": "Get TokenMetrics for Active Slot.",
                 "responses": {
                     "200": {
@@ -865,6 +1880,9 @@ const docTemplate = `{
                 ],
                 "produces": [
                     "audio/x-wav"
+                ],
+                "tags": [
+                    "audio"
                 ],
                 "summary": "Generates audio from the input text.",
                 "parameters": [
@@ -888,6 +1906,95 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/audio/diarization": {
+            "post": {
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "tags": [
+                    "audio"
+                ],
+                "summary": "Identify speakers in audio (who spoke when).",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "model",
+                        "name": "model",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "file",
+                        "description": "audio file",
+                        "name": "file",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "exact speaker count (\u003e0 forces; 0 = auto)",
+                        "name": "num_speakers",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "lower bound when auto-detecting",
+                        "name": "min_speakers",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "upper bound when auto-detecting",
+                        "name": "max_speakers",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "number",
+                        "description": "clustering distance threshold when num_speakers is unknown",
+                        "name": "clustering_threshold",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "number",
+                        "description": "discard segments shorter than this (seconds)",
+                        "name": "min_duration_on",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "number",
+                        "description": "merge gaps shorter than this (seconds)",
+                        "name": "min_duration_off",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "string",
+                        "description": "audio language hint (only meaningful for backends that bundle ASR)",
+                        "name": "language",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "include per-segment transcript when the backend supports it",
+                        "name": "include_text",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "string",
+                        "description": "json (default), verbose_json, or rttm",
+                        "name": "response_format",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/schema.DiarizationResult"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/audio/speech": {
             "post": {
                 "consumes": [
@@ -895,6 +2002,9 @@ const docTemplate = `{
                 ],
                 "produces": [
                     "audio/x-wav"
+                ],
+                "tags": [
+                    "audio"
                 ],
                 "summary": "Generates audio from the input text.",
                 "parameters": [
@@ -923,6 +2033,9 @@ const docTemplate = `{
                 "consumes": [
                     "multipart/form-data"
                 ],
+                "tags": [
+                    "audio"
+                ],
                 "summary": "Transcribes audio into the input language.",
                 "parameters": [
                     {
@@ -938,6 +2051,28 @@ const docTemplate = `{
                         "name": "file",
                         "in": "formData",
                         "required": true
+                    },
+                    {
+                        "type": "number",
+                        "description": "sampling temperature",
+                        "name": "temperature",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "collectionFormat": "csv",
+                        "description": "timestamp granularities (word, segment)",
+                        "name": "timestamp_granularities",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "stream partial results as SSE",
+                        "name": "stream",
+                        "in": "formData"
                     }
                 ],
                 "responses": {
@@ -955,6 +2090,9 @@ const docTemplate = `{
         },
         "/v1/chat/completions": {
             "post": {
+                "tags": [
+                    "inference"
+                ],
                 "summary": "Generate a chat completions for a given prompt and model.",
                 "parameters": [
                     {
@@ -979,6 +2117,9 @@ const docTemplate = `{
         },
         "/v1/completions": {
             "post": {
+                "tags": [
+                    "inference"
+                ],
                 "summary": "Generate completions for a given prompt and model.",
                 "parameters": [
                     {
@@ -1003,6 +2144,9 @@ const docTemplate = `{
         },
         "/v1/detection": {
             "post": {
+                "tags": [
+                    "detection"
+                ],
                 "summary": "Detects objects in the input image.",
                 "parameters": [
                     {
@@ -1027,6 +2171,9 @@ const docTemplate = `{
         },
         "/v1/edits": {
             "post": {
+                "tags": [
+                    "inference"
+                ],
                 "summary": "OpenAI edit endpoint",
                 "parameters": [
                     {
@@ -1051,6 +2198,9 @@ const docTemplate = `{
         },
         "/v1/embeddings": {
             "post": {
+                "tags": [
+                    "embeddings"
+                ],
                 "summary": "Get a vector representation of a given input that can be easily consumed by machine learning models and algorithms.",
                 "parameters": [
                     {
@@ -1073,8 +2223,170 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/face/analyze": {
+            "post": {
+                "tags": [
+                    "face-recognition"
+                ],
+                "summary": "Analyze demographic attributes (age, gender, ...) of faces.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceAnalyzeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceAnalyzeResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/face/embed": {
+            "post": {
+                "tags": [
+                    "face-recognition"
+                ],
+                "summary": "Extract a face embedding from an image.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceEmbedRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceEmbedResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/face/forget": {
+            "post": {
+                "tags": [
+                    "face-recognition"
+                ],
+                "summary": "Remove a previously-registered face by ID.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceForgetRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    }
+                }
+            }
+        },
+        "/v1/face/identify": {
+            "post": {
+                "tags": [
+                    "face-recognition"
+                ],
+                "summary": "Identify a face against the registered database (1:N recognition).",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceIdentifyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceIdentifyResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/face/register": {
+            "post": {
+                "tags": [
+                    "face-recognition"
+                ],
+                "summary": "Register a face for 1:N identification.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceRegisterRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceRegisterResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/face/verify": {
+            "post": {
+                "tags": [
+                    "face-recognition"
+                ],
+                "summary": "Verify that two images depict the same person.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceVerifyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.FaceVerifyResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/v1/images/generations": {
             "post": {
+                "tags": [
+                    "images"
+                ],
                 "summary": "Creates an image given a prompt.",
                 "parameters": [
                     {
@@ -1176,6 +2488,9 @@ const docTemplate = `{
         },
         "/v1/mcp/chat/completions": {
             "post": {
+                "tags": [
+                    "mcp"
+                ],
                 "summary": "MCP chat completions with automatic tool execution",
                 "parameters": [
                     {
@@ -1200,6 +2515,9 @@ const docTemplate = `{
         },
         "/v1/messages": {
             "post": {
+                "tags": [
+                    "inference"
+                ],
                 "summary": "Generate a message response for the given messages and model.",
                 "parameters": [
                     {
@@ -1224,6 +2542,9 @@ const docTemplate = `{
         },
         "/v1/models": {
             "get": {
+                "tags": [
+                    "models"
+                ],
                 "summary": "List and describe the various models available in the API.",
                 "responses": {
                     "200": {
@@ -1237,6 +2558,9 @@ const docTemplate = `{
         },
         "/v1/rerank": {
             "post": {
+                "tags": [
+                    "rerank"
+                ],
                 "summary": "Reranks a list of phrases by relevance to a given text query.",
                 "parameters": [
                     {
@@ -1261,6 +2585,9 @@ const docTemplate = `{
         },
         "/v1/responses": {
             "post": {
+                "tags": [
+                    "inference"
+                ],
                 "summary": "Create a response using the Open Responses API",
                 "parameters": [
                     {
@@ -1286,6 +2613,9 @@ const docTemplate = `{
         "/v1/responses/{id}": {
             "get": {
                 "description": "Retrieve a response by ID. Can be used for polling background responses or resuming streaming responses.",
+                "tags": [
+                    "inference"
+                ],
                 "summary": "Get a response by ID",
                 "parameters": [
                     {
@@ -1335,6 +2665,9 @@ const docTemplate = `{
         "/v1/responses/{id}/cancel": {
             "post": {
                 "description": "Cancel a background response if it's still in progress",
+                "tags": [
+                    "inference"
+                ],
                 "summary": "Cancel a response",
                 "parameters": [
                     {
@@ -1371,6 +2704,9 @@ const docTemplate = `{
         },
         "/v1/sound-generation": {
             "post": {
+                "tags": [
+                    "audio"
+                ],
                 "summary": "Generates audio from the input text.",
                 "parameters": [
                     {
@@ -1395,6 +2731,9 @@ const docTemplate = `{
         },
         "/v1/text-to-speech/{voice-id}": {
             "post": {
+                "tags": [
+                    "audio"
+                ],
                 "summary": "Generates audio from the input text.",
                 "parameters": [
                     {
@@ -1432,6 +2771,9 @@ const docTemplate = `{
                 "produces": [
                     "audio/x-wav"
                 ],
+                "tags": [
+                    "tokenize"
+                ],
                 "summary": "Get TokenMetrics for Active Slot.",
                 "responses": {
                     "200": {
@@ -1445,6 +2787,9 @@ const docTemplate = `{
         },
         "/v1/tokenize": {
             "post": {
+                "tags": [
+                    "tokenize"
+                ],
                 "summary": "Tokenize the input.",
                 "parameters": [
                     {
@@ -1467,10 +2812,172 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/voice/analyze": {
+            "post": {
+                "tags": [
+                    "voice-recognition"
+                ],
+                "summary": "Analyze demographic attributes (age, gender, emotion) from a voice clip.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceAnalyzeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceAnalyzeResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/voice/embed": {
+            "post": {
+                "tags": [
+                    "voice-recognition"
+                ],
+                "summary": "Extract a speaker embedding from an audio clip.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceEmbedRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceEmbedResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/voice/forget": {
+            "post": {
+                "tags": [
+                    "voice-recognition"
+                ],
+                "summary": "Remove a previously-registered speaker by ID.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceForgetRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    }
+                }
+            }
+        },
+        "/v1/voice/identify": {
+            "post": {
+                "tags": [
+                    "voice-recognition"
+                ],
+                "summary": "Identify a speaker against the registered database (1:N recognition).",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceIdentifyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceIdentifyResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/voice/register": {
+            "post": {
+                "tags": [
+                    "voice-recognition"
+                ],
+                "summary": "Register a speaker for 1:N identification.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceRegisterRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceRegisterResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/voice/verify": {
+            "post": {
+                "tags": [
+                    "voice-recognition"
+                ],
+                "summary": "Verify that two audio clips were spoken by the same person.",
+                "parameters": [
+                    {
+                        "description": "query params",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceVerifyRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Response",
+                        "schema": {
+                            "$ref": "#/definitions/schema.VoiceVerifyResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/vad": {
             "post": {
                 "consumes": [
                     "application/json"
+                ],
+                "tags": [
+                    "audio"
                 ],
                 "summary": "Detect voice fragments in an audio stream",
                 "parameters": [
@@ -1496,6 +3003,9 @@ const docTemplate = `{
         },
         "/video": {
             "post": {
+                "tags": [
+                    "video"
+                ],
                 "summary": "Creates a video given a prompt.",
                 "parameters": [
                     {
@@ -1517,6 +3027,25 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/ws/backend-logs/{modelId}": {
+            "get": {
+                "description": "Opens a WebSocket connection for real-time backend log streaming. Sends an initial batch of existing lines (type \"initial\"), then streams new lines as they appear (type \"line\"). Supports ping/pong keepalive.",
+                "tags": [
+                    "monitoring"
+                ],
+                "summary": "Stream backend logs via WebSocket",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Model ID",
+                        "name": "modelId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {}
+            }
         }
     },
     "definitions": {
@@ -1527,6 +3056,30 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "url": {
+                    "type": "string"
+                },
+                "verification": {
+                    "$ref": "#/definitions/config.GalleryVerification"
+                }
+            }
+        },
+        "config.GalleryVerification": {
+            "type": "object",
+            "properties": {
+                "identity": {
+                    "type": "string"
+                },
+                "identity_regex": {
+                    "type": "string"
+                },
+                "issuer": {
+                    "type": "string"
+                },
+                "issuer_regex": {
+                    "type": "string"
+                },
+                "not_before": {
+                    "description": "NotBefore is an RFC3339 timestamp. Empty disables the time check.",
                     "type": "string"
                 }
             }
@@ -1542,7 +3095,7 @@ const docTemplate = `{
                 },
                 "parameters": {
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "strict": {
                     "type": "boolean"
@@ -1554,7 +3107,7 @@ const docTemplate = `{
             "properties": {
                 "properties": {
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "type": {
                     "type": "string"
@@ -1566,7 +3119,7 @@ const docTemplate = `{
             "properties": {
                 "$defs": {
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "anyOf": {
                     "type": "array",
@@ -1613,6 +3166,10 @@ const docTemplate = `{
                 "alias": {
                     "type": "string"
                 },
+                "backend": {
+                    "description": "Backend is the resolved backend engine for this model (e.g. \"llama-cpp\").\nPopulated at load time from overrides, inline config, or the URL-referenced config file.",
+                    "type": "string"
+                },
                 "capabilities": {
                     "type": "object",
                     "additionalProperties": {
@@ -1656,6 +3213,10 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "sha256": {
+                    "description": "SHA256 is the expected sha256 of the backend tarball at URI / Mirrors.\nEmpty disables the integrity check; OCI URIs carry their own digest.",
+                    "type": "string"
+                },
                 "size": {
                     "description": "Size is an optional hardcoded model size string (e.g. \"500MB\", \"14.5GB\").\nUsed when the size cannot be estimated automatically.",
                     "type": "string"
@@ -1677,16 +3238,18 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                },
+                "version": {
+                    "type": "string"
                 }
             }
         },
-        "gallery.GalleryModel": {
+        "gallery.Metadata": {
             "type": "object",
             "properties": {
-                "config_file": {
-                    "description": "config_file is read in the situation where URL is blank - and therefore this is a base config.",
-                    "type": "object",
-                    "additionalProperties": true
+                "backend": {
+                    "description": "Backend is the resolved backend engine for this model (e.g. \"llama-cpp\").\nPopulated at load time from overrides, inline config, or the URL-referenced config file.",
+                    "type": "string"
                 },
                 "description": {
                     "type": "string"
@@ -1719,11 +3282,6 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
-                "overrides": {
-                    "description": "Overrides are used to override the configuration of the model located at URL",
-                    "type": "object",
-                    "additionalProperties": true
-                },
                 "size": {
                     "description": "Size is an optional hardcoded model size string (e.g. \"500MB\", \"14.5GB\").\nUsed when the size cannot be estimated automatically.",
                     "type": "string"
@@ -1742,6 +3300,168 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "gallery.NodeDriftInfo": {
+            "type": "object",
+            "properties": {
+                "digest": {
+                    "type": "string"
+                },
+                "node_id": {
+                    "type": "string"
+                },
+                "node_name": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "gallery.UpgradeInfo": {
+            "type": "object",
+            "properties": {
+                "available_digest": {
+                    "type": "string"
+                },
+                "available_version": {
+                    "type": "string"
+                },
+                "backend_name": {
+                    "type": "string"
+                },
+                "installed_digest": {
+                    "type": "string"
+                },
+                "installed_version": {
+                    "type": "string"
+                },
+                "node_drift": {
+                    "description": "NodeDrift lists nodes whose installed version or digest differs from\nthe cluster majority. Non-empty means the cluster has diverged and an\nupgrade will realign it. Empty in single-node mode.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/gallery.NodeDriftInfo"
+                    }
+                }
+            }
+        },
+        "galleryop.NodeProgress": {
+            "type": "object",
+            "properties": {
+                "current": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "file_name": {
+                    "type": "string"
+                },
+                "node_id": {
+                    "type": "string"
+                },
+                "node_name": {
+                    "type": "string"
+                },
+                "percentage": {
+                    "type": "number"
+                },
+                "phase": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "total": {
+                    "type": "string"
+                }
+            }
+        },
+        "galleryop.OpStatus": {
+            "type": "object",
+            "properties": {
+                "cancellable": {
+                    "description": "Cancellable is true if the operation can be cancelled",
+                    "type": "boolean"
+                },
+                "cancelled": {
+                    "description": "Cancelled is true if the operation was cancelled",
+                    "type": "boolean"
+                },
+                "deletion": {
+                    "description": "Deletion is true if the operation is a deletion",
+                    "type": "boolean"
+                },
+                "downloaded_size": {
+                    "type": "string"
+                },
+                "file_name": {
+                    "type": "string"
+                },
+                "file_size": {
+                    "type": "string"
+                },
+                "gallery_element_name": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "nodes": {
+                    "description": "Nodes is the per-node breakdown for a fanned-out backend install.\nPopulated by DistributedBackendManager (per-node terminal status)\nand by the Phase 2 progress bridge (per-byte ticks). The\n/api/operations handler surfaces this so the UI can render an\nexpandable per-node view of an in-flight install.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/galleryop.NodeProgress"
+                    }
+                },
+                "processed": {
+                    "type": "boolean"
+                },
+                "progress": {
+                    "type": "number"
+                }
+            }
+        },
+        "localai.APIInstructionResponse": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "swagger_fragment": {
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "localai.BrandingResponse": {
+            "type": "object",
+            "properties": {
+                "favicon_url": {
+                    "type": "string"
+                },
+                "instance_name": {
+                    "type": "string"
+                },
+                "instance_tagline": {
+                    "type": "string"
+                },
+                "logo_horizontal_url": {
+                    "type": "string"
+                },
+                "logo_url": {
+                    "type": "string"
                 }
             }
         },
@@ -1756,10 +3476,14 @@ const docTemplate = `{
         "localai.GalleryModel": {
             "type": "object",
             "properties": {
+                "backend": {
+                    "description": "Backend is the resolved backend engine for this model (e.g. \"llama-cpp\").\nPopulated at load time from overrides, inline config, or the URL-referenced config file.",
+                    "type": "string"
+                },
                 "config_file": {
                     "description": "config_file is read in the situation where URL is blank - and therefore this is a base config.",
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "description": {
                     "type": "string"
@@ -1798,7 +3522,7 @@ const docTemplate = `{
                 "overrides": {
                     "description": "Overrides are used to override the configuration of the model located at URL",
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "size": {
                     "description": "Size is an optional hardcoded model size string (e.g. \"500MB\", \"14.5GB\").\nUsed when the size cannot be estimated automatically.",
@@ -1818,6 +3542,97 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "localai.ModelResponse": {
+            "type": "object",
+            "properties": {
+                "config": {},
+                "details": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "error": {
+                    "type": "string"
+                },
+                "filename": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "success": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "localai.UpdateMaxReplicasPerModelRequest": {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "description": "Value is the new per-model replica cap on this node. Must be \u003e= 1.",
+                    "type": "integer"
+                }
+            }
+        },
+        "model.BackendLogLine": {
+            "type": "object",
+            "properties": {
+                "stream": {
+                    "description": "\"stdout\" or \"stderr\"",
+                    "type": "string"
+                },
+                "text": {
+                    "type": "string"
+                },
+                "timestamp": {
+                    "type": "string"
+                }
+            }
+        },
+        "modeladmin.VRAMRequest": {
+            "type": "object",
+            "properties": {
+                "context_size": {
+                    "type": "integer"
+                },
+                "gpu_layers": {
+                    "type": "integer"
+                },
+                "kv_quant_bits": {
+                    "type": "integer"
+                },
+                "model": {
+                    "type": "string"
+                }
+            }
+        },
+        "modeladmin.VRAMResponse": {
+            "type": "object",
+            "properties": {
+                "context_length": {
+                    "type": "integer"
+                },
+                "context_note": {
+                    "type": "string"
+                },
+                "model_max_context": {
+                    "type": "integer"
+                },
+                "size_bytes": {
+                    "type": "integer"
+                },
+                "size_display": {
+                    "type": "string"
+                },
+                "vram_bytes": {
+                    "type": "integer"
+                },
+                "vram_display": {
+                    "type": "string"
                 }
             }
         },
@@ -1894,7 +3709,7 @@ const docTemplate = `{
                 },
                 "input": {
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "is_error": {
                     "type": "boolean"
@@ -2030,7 +3845,7 @@ const docTemplate = `{
                 },
                 "input_schema": {
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "name": {
                     "type": "string"
@@ -2096,8 +3911,15 @@ const docTemplate = `{
                 "class_name": {
                     "type": "string"
                 },
+                "confidence": {
+                    "type": "number"
+                },
                 "height": {
                     "type": "number"
+                },
+                "mask": {
+                    "description": "base64-encoded PNG segmentation mask",
+                    "type": "string"
                 },
                 "width": {
                     "type": "number"
@@ -2113,11 +3935,34 @@ const docTemplate = `{
         "schema.DetectionRequest": {
             "type": "object",
             "properties": {
+                "boxes": {
+                    "description": "Box coordinates as [x1,y1,x2,y2,...] quads",
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                },
                 "image": {
+                    "description": "URL or base64-encoded image to analyze",
                     "type": "string"
                 },
                 "model": {
                     "type": "string"
+                },
+                "points": {
+                    "description": "Point coordinates as [x,y,label,...] triples (label: 1=pos, 0=neg)",
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                },
+                "prompt": {
+                    "description": "Text prompt (for SAM 3 PCS mode)",
+                    "type": "string"
+                },
+                "threshold": {
+                    "description": "Detection confidence threshold",
+                    "type": "number"
                 }
             }
         },
@@ -2129,6 +3974,75 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/schema.Detection"
                     }
+                }
+            }
+        },
+        "schema.DiarizationResult": {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "type": "number"
+                },
+                "language": {
+                    "type": "string"
+                },
+                "num_speakers": {
+                    "type": "integer"
+                },
+                "segments": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.DiarizationSegment"
+                    }
+                },
+                "speakers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.DiarizationSpeaker"
+                    }
+                },
+                "task": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.DiarizationSegment": {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "type": "number"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "speaker": {
+                    "type": "string"
+                },
+                "start": {
+                    "type": "number"
+                },
+                "text": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.DiarizationSpeaker": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "segment_count": {
+                    "type": "integer"
+                },
+                "total_speech_duration": {
+                    "type": "number"
                 }
             }
         },
@@ -2178,6 +4092,307 @@ const docTemplate = `{
                 },
                 "vocal_language": {
                     "type": "string"
+                }
+            }
+        },
+        "schema.FaceAnalysis": {
+            "type": "object",
+            "properties": {
+                "age": {
+                    "type": "number"
+                },
+                "antispoof_score": {
+                    "type": "number"
+                },
+                "dominant_emotion": {
+                    "type": "string"
+                },
+                "dominant_gender": {
+                    "type": "string"
+                },
+                "dominant_race": {
+                    "type": "string"
+                },
+                "emotion": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "format": "float32"
+                    }
+                },
+                "face_confidence": {
+                    "type": "number"
+                },
+                "gender": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "format": "float32"
+                    }
+                },
+                "is_real": {
+                    "description": "Liveness fields — see FaceVerifyResponse for why these are pointers.",
+                    "type": "boolean"
+                },
+                "race": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "format": "float32"
+                    }
+                },
+                "region": {
+                    "$ref": "#/definitions/schema.FacialArea"
+                }
+            }
+        },
+        "schema.FaceAnalyzeRequest": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "description": "subset of {\"age\",\"gender\",\"emotion\",\"race\"}",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "anti_spoofing": {
+                    "type": "boolean"
+                },
+                "img": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FaceAnalyzeResponse": {
+            "type": "object",
+            "properties": {
+                "faces": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.FaceAnalysis"
+                    }
+                }
+            }
+        },
+        "schema.FaceEmbedRequest": {
+            "type": "object",
+            "properties": {
+                "img": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FaceEmbedResponse": {
+            "type": "object",
+            "properties": {
+                "dim": {
+                    "type": "integer"
+                },
+                "embedding": {
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                },
+                "model": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FaceForgetRequest": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "store": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FaceIdentifyMatch": {
+            "type": "object",
+            "properties": {
+                "confidence": {
+                    "type": "number"
+                },
+                "distance": {
+                    "type": "number"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "match": {
+                    "description": "true when distance \u003c= threshold",
+                    "type": "boolean"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FaceIdentifyRequest": {
+            "type": "object",
+            "properties": {
+                "img": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "store": {
+                    "type": "string"
+                },
+                "threshold": {
+                    "description": "optional cutoff on distance",
+                    "type": "number"
+                },
+                "top_k": {
+                    "type": "integer"
+                }
+            }
+        },
+        "schema.FaceIdentifyResponse": {
+            "type": "object",
+            "properties": {
+                "matches": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.FaceIdentifyMatch"
+                    }
+                }
+            }
+        },
+        "schema.FaceRegisterRequest": {
+            "type": "object",
+            "properties": {
+                "img": {
+                    "type": "string"
+                },
+                "labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "model": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "store": {
+                    "description": "vector store model; empty = local-store default",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FaceRegisterResponse": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "registered_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.FaceVerifyRequest": {
+            "type": "object",
+            "properties": {
+                "anti_spoofing": {
+                    "type": "boolean"
+                },
+                "img1": {
+                    "type": "string"
+                },
+                "img2": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "threshold": {
+                    "type": "number"
+                }
+            }
+        },
+        "schema.FaceVerifyResponse": {
+            "type": "object",
+            "properties": {
+                "confidence": {
+                    "type": "number"
+                },
+                "distance": {
+                    "type": "number"
+                },
+                "img1_antispoof_score": {
+                    "type": "number"
+                },
+                "img1_area": {
+                    "$ref": "#/definitions/schema.FacialArea"
+                },
+                "img1_is_real": {
+                    "description": "Liveness fields are only populated when the request set\nanti_spoofing=true. Pointers keep them fully absent from the\nJSON response otherwise, so callers can tell \"not checked\"\napart from \"checked and fake\" (which would collapse to zero\nvalues with plain bool+omitempty).",
+                    "type": "boolean"
+                },
+                "img2_antispoof_score": {
+                    "type": "number"
+                },
+                "img2_area": {
+                    "$ref": "#/definitions/schema.FacialArea"
+                },
+                "img2_is_real": {
+                    "type": "boolean"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "processing_time_ms": {
+                    "type": "number"
+                },
+                "threshold": {
+                    "type": "number"
+                },
+                "verified": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "schema.FacialArea": {
+            "type": "object",
+            "properties": {
+                "h": {
+                    "type": "number"
+                },
+                "w": {
+                    "type": "number"
+                },
+                "x": {
+                    "type": "number"
+                },
+                "y": {
+                    "type": "number"
                 }
             }
         },
@@ -2231,12 +4446,6 @@ const docTemplate = `{
             "properties": {
                 "b64_json": {
                     "type": "string"
-                },
-                "embedding": {
-                    "type": "array",
-                    "items": {
-                        "type": "number"
-                    }
                 },
                 "index": {
                     "type": "integer"
@@ -2466,13 +4675,15 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "job_id": {
+                    "description": "unique job identifier",
                     "type": "string"
                 },
                 "status": {
+                    "description": "initial status (pending)",
                     "type": "string"
                 },
                 "url": {
-                    "description": "URL to check job status",
+                    "description": "URL to poll for job status",
                     "type": "string"
                 }
             }
@@ -2500,7 +4711,7 @@ const docTemplate = `{
                 "arguments": {
                     "description": "Tool arguments or result data",
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "content": {
                     "description": "The actual trace content",
@@ -2516,6 +4727,27 @@ const docTemplate = `{
                 },
                 "type": {
                     "description": "\"reasoning\", \"tool_call\", \"tool_result\", \"status\"",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.KnownBackend": {
+            "type": "object",
+            "properties": {
+                "auto_detect": {
+                    "type": "boolean"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "installed": {
+                    "description": "Installed is true when the backend is currently present on disk — i.e. it\nappears in gallery.ListSystemBackends(systemState). Importer-registered or\ncurated pref-only backends default to false unless they also show up on\ndisk. The import form uses this to warn users that submitting an import\nmay trigger an automatic backend download.",
+                    "type": "boolean"
+                },
+                "modality": {
+                    "type": "string"
+                },
+                "name": {
                     "type": "string"
                 }
             }
@@ -2586,27 +4818,6 @@ const docTemplate = `{
                 "role": {
                     "description": "The message role",
                     "type": "string"
-                },
-                "string_audios": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "string_content": {
-                    "type": "string"
-                },
-                "string_images": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "string_videos": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
                 },
                 "tool_call_id": {
                     "type": "string"
@@ -2769,7 +4980,7 @@ const docTemplate = `{
                 },
                 "parameters": {
                     "type": "object",
-                    "additionalProperties": true
+                    "additionalProperties": {}
                 },
                 "strict": {
                     "description": "Always include in response",
@@ -3138,6 +5349,10 @@ const docTemplate = `{
                 "echo": {
                     "type": "boolean"
                 },
+                "encoding_format": {
+                    "description": "Embedding encoding format: \"float\" (default) or \"base64\" (OpenAI Node.js SDK default)",
+                    "type": "string"
+                },
                 "file": {
                     "description": "whisper",
                     "type": "string"
@@ -3197,6 +5412,10 @@ const docTemplate = `{
                         }
                     ]
                 },
+                "max_completion_tokens": {
+                    "description": "MaxCompletionTokens is the modern alias for max_tokens\n(OpenAI deprecated max_tokens; gpt-5 / o-series reject it).\nAccepted on the wire so up-to-date clients can use the new\nname; the request middleware collapses it into Maxtokens so\ninternal code reads exactly one field.",
+                    "type": "integer"
+                },
                 "max_tokens": {
                     "type": "integer"
                 },
@@ -3212,6 +5431,9 @@ const docTemplate = `{
                     "additionalProperties": {
                         "type": "string"
                     }
+                },
+                "min_p": {
+                    "type": "number"
                 },
                 "model": {
                     "type": "string"
@@ -3281,6 +5503,14 @@ const docTemplate = `{
                 "stream": {
                     "type": "boolean"
                 },
+                "stream_options": {
+                    "description": "StreamOptions opts into OpenAI streaming extensions, e.g. include_usage.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.StreamOptions"
+                        }
+                    ]
+                },
                 "temperature": {
                     "type": "number"
                 },
@@ -3346,7 +5576,12 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "usage": {
-                    "$ref": "#/definitions/schema.OpenAIUsage"
+                    "description": "Usage is intentionally a pointer with omitempty: per the OpenAI\nchat-completion streaming spec, intermediate chunks must not carry\na ` + "`" + `usage` + "`" + ` field. Marshalling a value-typed usage would emit\n` + "`" + `\"usage\":{\"prompt_tokens\":0,...}` + "`" + ` on every chunk and break\nOpenAI-SDK consumers that filter on a truthy ` + "`" + `result.usage` + "`" + `\n(continuedev/continue, Kilo Code, Roo Code, etc.).",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/schema.OpenAIUsage"
+                        }
+                    ]
                 }
             }
         },
@@ -3512,6 +5747,117 @@ const docTemplate = `{
                 }
             }
         },
+        "schema.PIIDecideRequest": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "description": "Text is the user-visible content to inspect. Required.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.PIIDecideResponse": {
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "description": "Findings is one entry per matched span — pattern id, byte\nrange, and audit-safe hash prefix (never the matched value).",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.PIIFinding"
+                    }
+                },
+                "redacted_preview": {
+                    "description": "RedactedPreview is the input with mask-action spans replaced\nby their placeholders. Identical to Text when no findings or\nwhen the strongest action is block/route_local (which don't\nrewrite content).",
+                    "type": "string"
+                },
+                "suggested_action": {
+                    "description": "SuggestedAction is the strongest action across all findings:\n\"block\", \"route_local\", \"mask\", or \"allow\" (no findings).",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.PIIFinding": {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "type": "integer"
+                },
+                "hash_prefix": {
+                    "type": "string"
+                },
+                "pattern": {
+                    "type": "string"
+                },
+                "start": {
+                    "type": "integer"
+                }
+            }
+        },
+        "schema.RouterDecideRequest": {
+            "type": "object",
+            "properties": {
+                "input": {
+                    "description": "Input is the user-visible prompt text to classify. Required.\nSchema-shape extraction (chat-message concatenation, etc.) is\nthe caller's responsibility — matches the Probe contract used\nby the in-band middleware.",
+                    "type": "string"
+                },
+                "router": {
+                    "description": "Router is the name of the router model (a ModelConfig with a\n` + "`" + `router:` + "`" + ` block). Required.",
+                    "type": "string"
+                }
+            }
+        },
+        "schema.RouterDecideResponse": {
+            "type": "object",
+            "properties": {
+                "cache_similarity": {
+                    "description": "CacheSimilarity carries the cosine similarity of the cache hit\n(0 when not cached).",
+                    "type": "number"
+                },
+                "cached": {
+                    "description": "Cached is true when the decision came from the L2 embedding\ncache rather than a fresh classifier run.",
+                    "type": "boolean"
+                },
+                "candidate": {
+                    "description": "Candidate is the model that would be routed to. Empty when no\ncandidate covers Labels AND no fallback is configured.",
+                    "type": "string"
+                },
+                "classifier": {
+                    "description": "Classifier is the classifier name that produced the decision\n(e.g. \"score\").",
+                    "type": "string"
+                },
+                "fallback": {
+                    "description": "Fallback is true when Candidate is the router's configured\nfallback because no candidate covered Labels. Lets callers\ndistinguish \"matched\" from \"fell back\" without comparing names.",
+                    "type": "boolean"
+                },
+                "labels": {
+                    "description": "Labels is the set of active policy labels.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "latency_ms": {
+                    "description": "LatencyMs is the classifier's wall-clock cost.",
+                    "type": "integer"
+                },
+                "router": {
+                    "description": "Router echoes the requested router model.",
+                    "type": "string"
+                },
+                "score": {
+                    "description": "Score is the top label's softmax probability (the\nclassifier-side confidence signal).",
+                    "type": "number"
+                }
+            }
+        },
+        "schema.StreamOptions": {
+            "type": "object",
+            "properties": {
+                "include_usage": {
+                    "type": "boolean"
+                }
+            }
+        },
         "schema.SysInfoModel": {
             "type": "object",
             "properties": {
@@ -3524,12 +5870,14 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "backends": {
+                    "description": "available backend engines",
                     "type": "array",
                     "items": {
                         "type": "string"
                     }
                 },
                 "loaded_models": {
+                    "description": "currently loaded models",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/schema.SysInfoModel"
@@ -3542,10 +5890,15 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "backend": {
+                    "description": "backend engine override",
                     "type": "string"
                 },
                 "input": {
                     "description": "text input",
+                    "type": "string"
+                },
+                "instructions": {
+                    "description": "Instructions is a free-form, per-request style/voice description. It maps to\nthe OpenAI ` + "`" + `instructions` + "`" + ` field and is forwarded to the backend so expressive\nTTS models (e.g. Qwen3-TTS CustomVoice/VoiceDesign) can vary tone or designed\nvoice per request instead of only via the static YAML option.",
                     "type": "string"
                 },
                 "language": {
@@ -3554,6 +5907,13 @@ const docTemplate = `{
                 },
                 "model": {
                     "type": "string"
+                },
+                "params": {
+                    "description": "Params carries optional, backend-specific per-request generation parameters\n(LocalAI extension, e.g. Chatterbox exaggeration/cfg_weight/temperature).",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
                 },
                 "response_format": {
                     "description": "(optional) output format",
@@ -3618,14 +5978,14 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "prompt": {
-                    "description": "Template prompt (supports {{.param}} syntax)",
+                    "description": "Template prompt (supports Go template .param syntax)",
                     "type": "string"
                 },
                 "updated_at": {
                     "type": "string"
                 },
                 "webhooks": {
-                    "description": "Webhook configuration (for notifications)\nSupport multiple webhook endpoints\nWebhooks can handle both success and failure cases using template variables:\n- {{.Job}} - Job object with all fields\n- {{.Task}} - Task object\n- {{.Result}} - Job result (if successful)\n- {{.Error}} - Error message (if failed, empty string if successful)\n- {{.Status}} - Job status string",
+                    "description": "Webhook configuration (for notifications).\nSupports multiple webhook endpoints.\nWebhooks can handle both success and failure cases using template variables:\n.Job (Job object), .Task (Task object), .Result (if successful),\n.Error (if failed), .Status (job status string).",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/schema.WebhookConfig"
@@ -3637,6 +5997,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "content": {
+                    "description": "text to tokenize",
                     "type": "string"
                 },
                 "model": {
@@ -3648,6 +6009,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "tokens": {
+                    "description": "token IDs",
                     "type": "array",
                     "items": {
                         "type": "integer"
@@ -3677,7 +6039,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "audio": {
-                    "description": "model name or full path",
+                    "description": "raw audio samples as float32 PCM",
                     "type": "array",
                     "items": {
                         "type": "number"
@@ -3692,52 +6054,309 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "cfg_scale": {
+                    "description": "classifier-free guidance scale",
                     "type": "number"
                 },
                 "end_image": {
+                    "description": "URL or base64 of the last frame",
                     "type": "string"
                 },
                 "fps": {
+                    "description": "frames per second",
                     "type": "integer"
                 },
                 "height": {
+                    "description": "output height in pixels",
                     "type": "integer"
                 },
                 "input_reference": {
+                    "description": "reference image or video URL",
                     "type": "string"
                 },
                 "model": {
                     "type": "string"
                 },
                 "negative_prompt": {
+                    "description": "things to avoid in the output",
                     "type": "string"
                 },
                 "num_frames": {
+                    "description": "total number of frames to generate",
                     "type": "integer"
                 },
                 "prompt": {
+                    "description": "text description of the video to generate",
                     "type": "string"
                 },
                 "response_format": {
+                    "description": "output format (url or b64_json)",
                     "type": "string"
                 },
                 "seconds": {
+                    "description": "duration in seconds (alternative to num_frames)",
                     "type": "string"
                 },
                 "seed": {
+                    "description": "random seed for reproducibility",
                     "type": "integer"
                 },
                 "size": {
+                    "description": "WxH shorthand (e.g. \"512x512\")",
                     "type": "string"
                 },
                 "start_image": {
+                    "description": "URL or base64 of the first frame",
                     "type": "string"
                 },
                 "step": {
+                    "description": "number of diffusion steps",
                     "type": "integer"
                 },
                 "width": {
+                    "description": "output width in pixels",
                     "type": "integer"
+                }
+            }
+        },
+        "schema.VoiceAnalysis": {
+            "type": "object",
+            "properties": {
+                "age": {
+                    "type": "number"
+                },
+                "dominant_emotion": {
+                    "type": "string"
+                },
+                "dominant_gender": {
+                    "type": "string"
+                },
+                "emotion": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "format": "float32"
+                    }
+                },
+                "end": {
+                    "type": "number"
+                },
+                "gender": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "format": "float32"
+                    }
+                },
+                "start": {
+                    "type": "number"
+                }
+            }
+        },
+        "schema.VoiceAnalyzeRequest": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "description": "subset of {\"age\",\"gender\",\"emotion\"}",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "audio": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.VoiceAnalyzeResponse": {
+            "type": "object",
+            "properties": {
+                "segments": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.VoiceAnalysis"
+                    }
+                }
+            }
+        },
+        "schema.VoiceEmbedRequest": {
+            "type": "object",
+            "properties": {
+                "audio": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.VoiceEmbedResponse": {
+            "type": "object",
+            "properties": {
+                "dim": {
+                    "type": "integer"
+                },
+                "embedding": {
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                },
+                "model": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.VoiceForgetRequest": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "store": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.VoiceIdentifyMatch": {
+            "type": "object",
+            "properties": {
+                "confidence": {
+                    "type": "number"
+                },
+                "distance": {
+                    "type": "number"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "match": {
+                    "type": "boolean"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.VoiceIdentifyRequest": {
+            "type": "object",
+            "properties": {
+                "audio": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "store": {
+                    "type": "string"
+                },
+                "threshold": {
+                    "type": "number"
+                },
+                "top_k": {
+                    "type": "integer"
+                }
+            }
+        },
+        "schema.VoiceIdentifyResponse": {
+            "type": "object",
+            "properties": {
+                "matches": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/schema.VoiceIdentifyMatch"
+                    }
+                }
+            }
+        },
+        "schema.VoiceRegisterRequest": {
+            "type": "object",
+            "properties": {
+                "audio": {
+                    "type": "string"
+                },
+                "labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "model": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "store": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.VoiceRegisterResponse": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "registered_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "schema.VoiceVerifyRequest": {
+            "type": "object",
+            "properties": {
+                "anti_spoofing": {
+                    "type": "boolean"
+                },
+                "audio1": {
+                    "type": "string"
+                },
+                "audio2": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "threshold": {
+                    "type": "number"
+                }
+            }
+        },
+        "schema.VoiceVerifyResponse": {
+            "type": "object",
+            "properties": {
+                "confidence": {
+                    "type": "number"
+                },
+                "distance": {
+                    "type": "number"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "processing_time_ms": {
+                    "type": "number"
+                },
+                "threshold": {
+                    "type": "number"
+                },
+                "verified": {
+                    "type": "boolean"
                 }
             }
         },
@@ -3764,45 +6383,6 @@ const docTemplate = `{
                     "type": "string"
                 }
             }
-        },
-        "services.GalleryOpStatus": {
-            "type": "object",
-            "properties": {
-                "cancellable": {
-                    "description": "Cancellable is true if the operation can be cancelled",
-                    "type": "boolean"
-                },
-                "cancelled": {
-                    "description": "Cancelled is true if the operation was cancelled",
-                    "type": "boolean"
-                },
-                "deletion": {
-                    "description": "Deletion is true if the operation is a deletion",
-                    "type": "boolean"
-                },
-                "downloaded_size": {
-                    "type": "string"
-                },
-                "error": {},
-                "file_name": {
-                    "type": "string"
-                },
-                "file_size": {
-                    "type": "string"
-                },
-                "gallery_element_name": {
-                    "type": "string"
-                },
-                "message": {
-                    "type": "string"
-                },
-                "processed": {
-                    "type": "boolean"
-                },
-                "progress": {
-                    "type": "number"
-                }
-            }
         }
     },
     "securityDefinitions": {
@@ -3819,7 +6399,7 @@ var SwaggerInfo = &swag.Spec{
 	Version:          "2.0.0",
 	Host:             "",
 	BasePath:         "/",
-	Schemes:          []string{},
+	Schemes:          []string{"http", "https"},
 	Title:            "LocalAI API",
 	Description:      "The LocalAI Rest API.",
 	InfoInstanceName: "swagger",

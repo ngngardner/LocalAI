@@ -15,6 +15,10 @@ var _ Importer = &MLXImporter{}
 
 type MLXImporter struct{}
 
+func (i *MLXImporter) Name() string      { return "mlx" }
+func (i *MLXImporter) Modality() string  { return "text" }
+func (i *MLXImporter) AutoDetects() bool { return true }
+
 func (i *MLXImporter) Match(details Details) bool {
 	preferences, err := details.Preferences.MarshalJSON()
 	if err != nil {
@@ -69,7 +73,7 @@ func (i *MLXImporter) Import(details Details) (gallery.ModelConfig, error) {
 	modelConfig := config.ModelConfig{
 		Name:                name,
 		Description:         description,
-		KnownUsecaseStrings: []string{"chat"},
+		KnownUsecaseStrings: []string{config.UsecaseChat},
 		Backend:             backend,
 		PredictionOptions: schema.PredictionOptions{
 			BasicModelRequest: schema.BasicModelRequest{
@@ -79,6 +83,23 @@ func (i *MLXImporter) Import(details Details) (gallery.ModelConfig, error) {
 		TemplateConfig: config.TemplateConfig{
 			UseTokenizerTemplate: true,
 		},
+	}
+
+	// Apply per-model-family inference parameter defaults
+	config.ApplyInferenceDefaults(&modelConfig, details.URI)
+
+	// Auto-set tool_parser / reasoning_parser from parser_defaults.json so
+	// the generated YAML mirrors what the vllm importer produces. The mlx
+	// backends auto-detect parsers from the chat template at runtime and
+	// ignore these Options, but surfacing them in the config keeps the two
+	// paths consistent and gives users a single place to override.
+	if parsers := config.MatchParserDefaults(details.URI); parsers != nil {
+		if tp, ok := parsers["tool_parser"]; ok {
+			modelConfig.Options = append(modelConfig.Options, "tool_parser:"+tp)
+		}
+		if rp, ok := parsers["reasoning_parser"]; ok {
+			modelConfig.Options = append(modelConfig.Options, "reasoning_parser:"+rp)
+		}
 	}
 
 	data, err := yaml.Marshal(modelConfig)

@@ -68,7 +68,7 @@ export default function ClientMCPDropdown({
         <div className="chat-mcp-dropdown-menu" style={{ minWidth: '280px' }}>
           <div className="chat-mcp-dropdown-header">
             <span>Client MCP Servers</span>
-            <button className="chat-mcp-select-all" onClick={() => setAddDialog(!addDialog)}>
+            <button type="button" className="chat-mcp-select-all" onClick={() => setAddDialog(!addDialog)}>
               <i className="fas fa-plus" /> Add
             </button>
           </div>
@@ -80,7 +80,7 @@ export default function ClientMCPDropdown({
                 placeholder="Server URL (e.g. https://mcp.example.com/sse)"
                 value={url}
                 onChange={e => setUrl(e.target.value)}
-                style={{ width: '100%', marginBottom: '4px' }}
+                style={{ width: '100%', marginBottom: 'var(--spacing-xs)' }}
               />
               <input
                 type="text"
@@ -88,7 +88,7 @@ export default function ClientMCPDropdown({
                 placeholder="Name (optional)"
                 value={name}
                 onChange={e => setName(e.target.value)}
-                style={{ width: '100%', marginBottom: '4px' }}
+                style={{ width: '100%', marginBottom: 'var(--spacing-xs)' }}
               />
               <input
                 type="password"
@@ -96,15 +96,15 @@ export default function ClientMCPDropdown({
                 placeholder="Auth token (optional)"
                 value={authToken}
                 onChange={e => setAuthToken(e.target.value)}
-                style={{ width: '100%', marginBottom: '4px' }}
+                style={{ width: '100%', marginBottom: 'var(--spacing-xs)' }}
               />
               <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', marginBottom: '6px' }}>
                 <input type="checkbox" checked={useProxy} onChange={e => setUseProxy(e.target.checked)} />
                 Use CORS proxy
               </label>
-              <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
-                <button className="btn btn-sm btn-secondary" onClick={() => setAddDialog(false)}>Cancel</button>
-                <button className="btn btn-sm btn-primary" onClick={handleAdd} disabled={!url.trim()}>Add</button>
+              <div style={{ display: 'flex', gap: 'var(--spacing-xs)', justifyContent: 'flex-end' }}>
+                <button type="button" className="btn btn-sm btn-secondary" onClick={() => setAddDialog(false)}>Cancel</button>
+                <button type="button" className="btn btn-sm btn-primary" onClick={handleAdd} disabled={!url.trim()}>Add</button>
               </div>
             </div>
           )}

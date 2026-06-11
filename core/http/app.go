@@ -10,17 +10,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 
+	"github.com/mudler/LocalAI/core/http/auth"
 	"github.com/mudler/LocalAI/core/http/endpoints/localai"
+
 	httpMiddleware "github.com/mudler/LocalAI/core/http/middleware"
 	"github.com/mudler/LocalAI/core/http/routes"
 
 	"github.com/mudler/LocalAI/core/application"
 	"github.com/mudler/LocalAI/core/schema"
-	"github.com/mudler/LocalAI/core/services"
+	"github.com/mudler/LocalAI/core/services/finetune"
+	"github.com/mudler/LocalAI/core/services/galleryop"
+	"github.com/mudler/LocalAI/core/services/nodes"
+	"github.com/mudler/LocalAI/core/services/quantization"
 
 	"github.com/mudler/xlog"
 )
@@ -46,9 +52,42 @@ var quietPaths = []string{"/api/operations", "/api/resources", "/healthz", "/rea
 // @license.name MIT
 // @license.url https://raw.githubusercontent.com/mudler/LocalAI/master/LICENSE
 // @BasePath /
+// @schemes http https
 // @securityDefinitions.apikey BearerAuth
 // @in header
 // @name Authorization
+// @tag.name inference
+// @tag.description Chat completions, text completions, edits, and responses (OpenAI-compatible)
+// @tag.name embeddings
+// @tag.description Vector embeddings (OpenAI-compatible)
+// @tag.name audio
+// @tag.description Text-to-speech, transcription, voice activity detection, sound generation
+// @tag.name images
+// @tag.description Image generation and inpainting
+// @tag.name video
+// @tag.description Video generation from prompts
+// @tag.name detection
+// @tag.description Object detection in images
+// @tag.name tokenize
+// @tag.description Tokenization and token metrics
+// @tag.name models
+// @tag.description Model gallery browsing, installation, deletion, and listing
+// @tag.name backends
+// @tag.description Backend gallery browsing, installation, deletion, and listing
+// @tag.name config
+// @tag.description Model configuration metadata, autocomplete, PATCH updates, VRAM estimation
+// @tag.name monitoring
+// @tag.description Prometheus metrics, backend status, system information
+// @tag.name mcp
+// @tag.description Model Context Protocol — tool-augmented chat with MCP servers
+// @tag.name agent-jobs
+// @tag.description Agent task and job management
+// @tag.name p2p
+// @tag.description Peer-to-peer networking nodes and tokens
+// @tag.name rerank
+// @tag.description Document reranking
+// @tag.name instructions
+// @tag.description API instruction discovery — browse instruction areas and get endpoint guides
 
 func API(application *application.Application) (*echo.Echo, error) {
 	e := echo.New()
@@ -121,12 +160,32 @@ func API(application *application.Application) (*echo.Echo, error) {
 		})
 	}
 
+	// Security headers (CSP, X-Content-Type-Options, X-Frame-Options,
+	// Referrer-Policy). Set early so every response — including 404s and
+	// errors — picks them up.
+	e.Use(httpMiddleware.SecurityHeaders())
+
 	// Custom logger middleware using xlog
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			req := c.Request()
 			res := c.Response()
 			err := next(c)
+
+			// Echo's central HTTPErrorHandler runs *after* this middleware
+			// returns, so res.Status still reads the default 200 here when a
+			// handler returned an error without writing a response. Mirror
+			// echo.DefaultHTTPErrorHandler's status derivation so the access
+			// log reflects the status the client actually receives — without
+			// this, every silent handler error logs as 200.
+			status := res.Status
+			if err != nil && !res.Committed {
+				status = http.StatusInternalServerError
+				var he *echo.HTTPError
+				if errors.As(err, &he) {
+					status = he.Code
+				}
+			}
 
 			// Fix for #7989: Reduce log verbosity of Web UI polling, resources API, and health checks
 			// These paths are logged at DEBUG level (hidden by default) instead of INFO.
@@ -138,10 +197,10 @@ func API(application *application.Application) (*echo.Echo, error) {
 				}
 			}
 
-			if isQuietPath && res.Status == 200 {
-				xlog.Debug("HTTP request", "method", req.Method, "path", req.URL.Path, "status", res.Status)
+			if isQuietPath && status == 200 {
+				xlog.Debug("HTTP request", "method", req.Method, "path", req.URL.Path, "status", status)
 			} else {
-				xlog.Info("HTTP request", "method", req.Method, "path", req.URL.Path, "status", res.Status)
+				xlog.Info("HTTP request", "method", req.Method, "path", req.URL.Path, "status", status)
 			}
 			return err
 		}
@@ -152,29 +211,26 @@ func API(application *application.Application) (*echo.Echo, error) {
 		e.Use(middleware.Recover())
 	}
 
-	// Metrics middleware
-	if !application.ApplicationConfig().DisableMetrics {
-		metricsService, err := services.NewLocalAIMetricsService()
-		if err != nil {
-			return nil, err
-		}
-
-		if metricsService != nil {
-			e.Use(localai.LocalAIMetricsAPIMiddleware(metricsService))
-			e.Server.RegisterOnShutdown(func() {
-				metricsService.Shutdown()
-			})
-		}
+	// Metrics middleware. The metric service was created in
+	// application.start() so the OTel global provider is set before any
+	// counter is registered (the routing-module billing recorder relies
+	// on this). We reuse that instance here rather than calling
+	// monitoring.NewLocalAIMetricsService a second time, which would
+	// create a second provider, second prometheus exporter, and orphan
+	// whichever instance lost the SetMeterProvider race.
+	if metricsService := application.MetricsService(); metricsService != nil {
+		e.Use(localai.LocalAIMetricsAPIMiddleware(metricsService))
+		e.Server.RegisterOnShutdown(func() {
+			_ = metricsService.Shutdown()
+		})
 	}
 
 	// Health Checks should always be exempt from auth, so register these first
 	routes.HealthRoutes(e)
 
-	// Get key auth middleware
-	keyAuthMiddleware, err := httpMiddleware.GetKeyAuthConfig(application.ApplicationConfig())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create key auth config: %w", err)
-	}
+	// Build auth middleware: use the new auth.Middleware when auth is enabled or
+	// as a unified replacement for the legacy key-auth middleware.
+	authMiddleware := auth.Middleware(application.AuthDB(), application.ApplicationConfig())
 
 	// Favicon handler
 	e.GET("/favicon.svg", func(c echo.Context) error {
@@ -209,44 +265,185 @@ func API(application *application.Application) (*echo.Echo, error) {
 		e.Static("/generated-videos", videoPath)
 	}
 
-	// Auth is applied to _all_ endpoints. No exceptions. Filtering out endpoints to bypass is the role of the Skipper property of the KeyAuth Configuration
-	e.Use(keyAuthMiddleware)
+	// Usage recording is initialised in application/startup.go and
+	// surfaced via application.StatsRecorder(); routes wire UsageMiddleware
+	// against that recorder regardless of auth state.
 
-	// CORS middleware
+	// Auth is applied to _all_ endpoints. Filtering out endpoints to bypass is
+	// the role of the exempt-path logic inside the middleware.
+	e.Use(authMiddleware)
+
+	// Feature and model access control (after auth middleware, before routes)
+	if application.AuthDB() != nil {
+		e.Use(auth.RequireRouteFeature(application.AuthDB()))
+		e.Use(auth.RequireModelAccess(application.AuthDB()))
+		e.Use(auth.RequireQuota(application.AuthDB()))
+	}
+
+	// CORS middleware. When CORS=true the operator must also specify the
+	// allowed origins; an empty allowlist would otherwise let Echo fall back
+	// to AllowOrigins=["*"], which is almost never what someone enabling
+	// "strict CORS" intended.
 	if application.ApplicationConfig().CORS {
-		corsConfig := middleware.CORSConfig{}
-		if application.ApplicationConfig().CORSAllowOrigins != "" {
-			corsConfig.AllowOrigins = strings.Split(application.ApplicationConfig().CORSAllowOrigins, ",")
+		if application.ApplicationConfig().CORSAllowOrigins == "" {
+			xlog.Warn("LOCALAI_CORS=true but LOCALAI_CORS_ALLOW_ORIGINS is empty; refusing to register a wildcard CORS policy. Set the allowlist or unset LOCALAI_CORS.")
+		} else {
+			corsConfig := middleware.CORSConfig{
+				AllowOrigins: strings.Split(application.ApplicationConfig().CORSAllowOrigins, ","),
+			}
+			e.Use(middleware.CORSWithConfig(corsConfig))
 		}
-		e.Use(middleware.CORSWithConfig(corsConfig))
 	} else {
 		e.Use(middleware.CORS())
 	}
 
-	// CSRF middleware
-	if application.ApplicationConfig().CSRF {
-		xlog.Debug("Enabling CSRF middleware. Tokens are now required for state-modifying requests")
-		e.Use(middleware.CSRF())
+	// CSRF middleware (enabled by default, disable with LOCALAI_DISABLE_CSRF=true)
+	//
+	// Protection relies on Echo's Sec-Fetch-Site header check (supported by all
+	// modern browsers). The legacy cookie+token approach is removed because
+	// Echo's Sec-Fetch-Site short-circuit never sets the cookie, so the frontend
+	// could never read a token to send back.
+	if !application.ApplicationConfig().DisableCSRF {
+		xlog.Debug("Enabling CSRF middleware (Sec-Fetch-Site mode)")
+		e.Use(middleware.CSRFWithConfig(middleware.CSRFConfig{
+			Skipper: func(c echo.Context) bool {
+				// Skip CSRF for API clients using auth headers (may be cross-origin)
+				if c.Request().Header.Get("Authorization") != "" {
+					return true
+				}
+				if c.Request().Header.Get("x-api-key") != "" || c.Request().Header.Get("xi-api-key") != "" {
+					return true
+				}
+				// Skip when Sec-Fetch-Site header is absent (older browsers, reverse
+				// proxies that strip the header). The SameSite=Lax cookie attribute
+				// provides baseline CSRF protection for these clients.
+				if c.Request().Header.Get("Sec-Fetch-Site") == "" {
+					return true
+				}
+				return false
+			},
+			// Allow same-site requests (subdomains / different ports) in addition
+			// to same-origin which Echo already permits by default.
+			AllowSecFetchSiteFunc: func(c echo.Context) (bool, error) {
+				secFetchSite := c.Request().Header.Get("Sec-Fetch-Site")
+				if secFetchSite == "same-site" {
+					return true, nil
+				}
+				// cross-site: block
+				return false, nil
+			},
+		}))
 	}
 
+	// Admin middleware: enforces admin role when auth is enabled, no-op otherwise
+	var adminMiddleware echo.MiddlewareFunc
+	if application.AuthDB() != nil {
+		adminMiddleware = auth.RequireAdmin()
+	} else {
+		adminMiddleware = auth.NoopMiddleware()
+	}
+
+	// Feature middlewares: per-feature access control
+	agentsMw := auth.RequireFeature(application.AuthDB(), auth.FeatureAgents)
+	skillsMw := auth.RequireFeature(application.AuthDB(), auth.FeatureSkills)
+	collectionsMw := auth.RequireFeature(application.AuthDB(), auth.FeatureCollections)
+	mcpJobsMw := auth.RequireFeature(application.AuthDB(), auth.FeatureMCPJobs)
+
 	requestExtractor := httpMiddleware.NewRequestExtractor(application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig())
+
+	// Register auth routes (login, callback, API keys, user management)
+	routes.RegisterAuthRoutes(e, application)
+
+	// Register routing-module usage endpoints. Unlike /api/auth/usage
+	// these go through the StatsRecorder and work in no-auth single-user
+	// mode by attributing requests to the synthetic "local" user.
+	routes.RegisterUsageRoutes(e, application)
+	routes.RegisterPIIRoutes(e, application)
+	routes.RegisterMiddlewareRoutes(e, application)
 
 	routes.RegisterElevenLabsRoutes(e, requestExtractor, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig())
 
 	// Create opcache for tracking UI operations (used by both UI and LocalAI routes)
-	var opcache *services.OpCache
+	var opcache *galleryop.OpCache
 	if !application.ApplicationConfig().DisableWebUI {
-		opcache = services.NewOpCache(application.GalleryService())
+		opcache = galleryop.NewOpCache(application.GalleryService())
+		// In distributed mode, wire the NATS client + gallery store so this
+		// replica's OpCache stays in sync with peers — without this the
+		// /api/operations endpoint returns whatever this single replica
+		// happened to admit, and a load-balanced UI poll alternates between
+		// "operation visible" and "operation gone" between replicas.
+		if d := application.Distributed(); d != nil {
+			opcache.SetMessagingClient(d.Nats)
+			if d.DistStores != nil && d.DistStores.Gallery != nil {
+				opcache.SetGalleryStore(d.DistStores.Gallery)
+			}
+			if err := opcache.Start(application.ApplicationConfig().Context); err != nil {
+				xlog.Warn("OpCache distributed subscribe failed; running standalone", "error", err)
+			}
+		}
 	}
 
-	routes.RegisterLocalAIRoutes(e, requestExtractor, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.GalleryService(), opcache, application.TemplatesEvaluator(), application)
-	routes.RegisterAgentPoolRoutes(e, application)
+	mcpMw := auth.RequireFeature(application.AuthDB(), auth.FeatureMCP)
+	routes.RegisterLocalAIRoutes(e, requestExtractor, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.GalleryService(), opcache, application.TemplatesEvaluator(), application, adminMiddleware, mcpJobsMw, mcpMw)
+	routes.RegisterAgentPoolRoutes(e, application, agentsMw, skillsMw, collectionsMw)
+	// Fine-tuning routes
+	fineTuningMw := auth.RequireFeature(application.AuthDB(), auth.FeatureFineTuning)
+	ftService := finetune.NewFineTuneService(
+		application.ApplicationConfig(),
+		application.ModelLoader(),
+		application.ModelConfigLoader(),
+	)
+	if d := application.Distributed(); d != nil {
+		ftService.SetNATSClient(d.Nats)
+		if d.DistStores != nil && d.DistStores.FineTune != nil {
+			ftService.SetFineTuneStore(d.DistStores.FineTune)
+		}
+	}
+	routes.RegisterFineTuningRoutes(e, ftService, application.ApplicationConfig(), fineTuningMw)
+
+	// Quantization routes
+	quantizationMw := auth.RequireFeature(application.AuthDB(), auth.FeatureQuantization)
+	qService := quantization.NewQuantizationService(
+		application.ApplicationConfig(),
+		application.ModelLoader(),
+		application.ModelConfigLoader(),
+	)
+	routes.RegisterQuantizationRoutes(e, qService, application.ApplicationConfig(), quantizationMw)
+
+	// Node management routes (distributed mode)
+	distCfg := application.ApplicationConfig().Distributed
+	var registry *nodes.NodeRegistry
+	var remoteUnloader nodes.NodeCommandSender
+	if d := application.Distributed(); d != nil {
+		registry = d.Registry
+		if d.Router != nil {
+			remoteUnloader = d.Router.Unloader()
+		}
+	}
+	natsCfg := distCfg.NatsAuthConfig()
+	routes.RegisterNodeSelfServiceRoutes(e, registry, distCfg.RegistrationToken, distCfg.AutoApproveNodes, application.AuthDB(), application.ApplicationConfig().Auth.APIKeyHMACSecret, natsCfg)
+	routes.RegisterNodeAdminRoutes(e, registry, remoteUnloader, application.GalleryService(), opcache, application.ApplicationConfig(), adminMiddleware, application.AuthDB(), application.ApplicationConfig().Auth.APIKeyHMACSecret, application.ApplicationConfig().Distributed.RegistrationToken, natsCfg)
+
+	// Distributed SSE routes (job progress + agent events via NATS)
+	if d := application.Distributed(); d != nil {
+		if d.Dispatcher != nil {
+			e.GET("/api/agent/jobs/:id/progress", d.Dispatcher.SSEHandler(), mcpJobsMw)
+		}
+		if d.AgentBridge != nil {
+			e.GET("/api/agents/:name/sse/distributed", d.AgentBridge.SSEHandler(), agentsMw)
+		}
+	}
+
 	routes.RegisterOpenAIRoutes(e, requestExtractor, application)
 	routes.RegisterAnthropicRoutes(e, requestExtractor, application)
 	routes.RegisterOpenResponsesRoutes(e, requestExtractor, application)
+	routes.RegisterOllamaRoutes(e, requestExtractor, application)
+	if application.ApplicationConfig().OllamaAPIRootEndpoint {
+		routes.RegisterOllamaRootEndpoint(e)
+	}
 	if !application.ApplicationConfig().DisableWebUI {
-		routes.RegisterUIAPIRoutes(e, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.GalleryService(), opcache, application)
-		routes.RegisterUIRoutes(e, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.GalleryService())
+		routes.RegisterUIAPIRoutes(e, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig(), application.GalleryService(), opcache, application, adminMiddleware)
+		routes.RegisterUIRoutes(e, application.ModelConfigLoader(), application.ApplicationConfig(), application.GalleryService(), adminMiddleware)
 
 		// Serve React SPA from / with SPA fallback via 404 handler
 		reactFS, fsErr := fs.Sub(reactUI, "react-ui/dist")
@@ -258,11 +455,31 @@ func API(application *application.Application) (*echo.Echo, error) {
 				if err != nil {
 					return c.String(http.StatusNotFound, "React UI not built")
 				}
-				// Inject <base href> for reverse-proxy support
+				// Inject <base href> for reverse-proxy support; baseURL comes
+				// from attacker-controllable Host / X-Forwarded-Host headers.
 				baseURL := httpMiddleware.BaseURL(c)
 				if baseURL != "" {
-					baseTag := `<base href="` + baseURL + `" />`
+					baseTag := `<base href="` + httpMiddleware.SecureBaseHref(baseURL) + `" />`
 					indexHTML = []byte(strings.Replace(string(indexHTML), "<head>", "<head>\n  "+baseTag, 1))
+				}
+				// <base href> only changes how relative URLs resolve; path-absolute
+				// URLs (those starting with `/`) still resolve against the origin
+				// and would bypass the reverse-proxy prefix. Rewrite the internal
+				// path-absolute references emitted by the build so the browser
+				// requests them through the proxy under the prefix.
+				//
+				// HTML-escape the prefix before interpolating it into attributes:
+				// BasePathPrefix already gates X-Forwarded-Prefix via
+				// SafeForwardedPrefix, but the validator only blocks open-redirect
+				// shapes (// prefix, backslashes, control chars), not attribute
+				// breakout characters like `"`. Escaping makes this resilient
+				// even if the validator ever loosens.
+				if prefix := httpMiddleware.BasePathPrefix(c); prefix != "/" {
+					safePrefix := httpMiddleware.SecureBaseHref(prefix)
+					html := string(indexHTML)
+					html = strings.ReplaceAll(html, `="/assets/`, `="`+safePrefix+`assets/`)
+					html = strings.ReplaceAll(html, `="/favicon.svg"`, `="`+safePrefix+`favicon.svg"`)
+					indexHTML = []byte(html)
 				}
 				return c.HTMLBlob(http.StatusOK, indexHTML)
 			}
@@ -270,41 +487,76 @@ func API(application *application.Application) (*echo.Echo, error) {
 			// Enable SPA fallback in the 404 handler for client-side routing
 			spaFallback = serveIndex
 
-			// Serve React SPA at /
-			e.GET("/", serveIndex)
+			// Serve React SPA at /app
+			e.GET("/app", serveIndex)
+			e.GET("/app/*", serveIndex)
 
-			// Serve React static assets (JS, CSS, etc.)
-			serveReactAsset := func(c echo.Context) error {
-				p := "assets/" + c.Param("*")
-				f, err := reactFS.Open(p)
-				if err == nil {
-					defer f.Close()
-					stat, statErr := f.Stat()
-					if statErr == nil && !stat.IsDir() {
-						contentType := mime.TypeByExtension(filepath.Ext(p))
-						if contentType == "" {
-							contentType = echo.MIMEOctetStream
-						}
-						return c.Stream(http.StatusOK, contentType, f)
-					}
+			// prefixRedirect performs a redirect that preserves X-Forwarded-Prefix
+			// for reverse-proxy support. The prefix is forgeable on misconfigured
+			// proxy chains, so reject anything that isn't a same-origin path.
+			prefixRedirect := func(c echo.Context, target string) error {
+				if prefix, ok := httpMiddleware.SafeForwardedPrefix(c.Request().Header.Get("X-Forwarded-Prefix")); ok {
+					target = strings.TrimSuffix(prefix, "/") + target
 				}
-				return echo.NewHTTPError(http.StatusNotFound)
+				return c.Redirect(http.StatusMovedPermanently, target)
 			}
-			e.GET("/assets/*", serveReactAsset)
 
-			// Backward compatibility: redirect /app/* to /*
-			e.GET("/app", func(c echo.Context) error {
-				return c.Redirect(http.StatusMovedPermanently, "/")
+			// Redirect / to /app
+			e.GET("/", func(c echo.Context) error {
+				return prefixRedirect(c, "/app")
 			})
-			e.GET("/app/*", func(c echo.Context) error {
+
+			// Backward compatibility: redirect /browse/* to /app/*
+			e.GET("/browse", func(c echo.Context) error {
+				return prefixRedirect(c, "/app")
+			})
+			e.GET("/browse/*", func(c echo.Context) error {
 				p := c.Param("*")
-				return c.Redirect(http.StatusMovedPermanently, "/"+p)
+				return prefixRedirect(c, "/app/"+p)
 			})
+
+			// Serve React static assets (JS, CSS, etc.) and i18n locale JSONs
+			// from the embedded React build.
+			serveReactSubdir := func(subdir string) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					p := subdir + "/" + c.Param("*")
+					f, err := reactFS.Open(p)
+					if err == nil {
+						defer f.Close()
+						stat, statErr := f.Stat()
+						if statErr == nil && !stat.IsDir() {
+							contentType := mime.TypeByExtension(filepath.Ext(p))
+							if contentType == "" {
+								contentType = echo.MIMEOctetStream
+							}
+							return c.Stream(http.StatusOK, contentType, f)
+						}
+					}
+					return echo.NewHTTPError(http.StatusNotFound)
+				}
+			}
+			e.GET("/assets/*", serveReactSubdir("assets"))
+			e.GET("/locales/*", serveReactSubdir("locales"))
 		}
 	}
 	routes.RegisterJINARoutes(e, requestExtractor, application.ModelConfigLoader(), application.ModelLoader(), application.ApplicationConfig())
 
 	// Note: 404 handling is done via HTTPErrorHandler above, no need for catch-all route
+
+	// HTTP server timeouts.
+	//
+	//   - ReadHeaderTimeout: bounds the slow-headers Slowloris case. 30s is
+	//     enough for a real client on a poor connection but cuts off a
+	//     drip-feeding attacker.
+	//   - IdleTimeout: bounds idle keep-alive connections.
+	//
+	// We deliberately leave ReadTimeout and WriteTimeout at 0:
+	//   - Request bodies can be multi-GB model/dataset uploads.
+	//   - Chat-completion and SSE responses can stream for many minutes.
+	// Operators who need stricter limits should front the server with a
+	// reverse proxy that terminates slow clients per-request.
+	e.Server.ReadHeaderTimeout = 30 * time.Second
+	e.Server.IdleTimeout = 120 * time.Second
 
 	// Log startup message
 	e.Server.RegisterOnShutdown(func() {

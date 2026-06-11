@@ -1,25 +1,36 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { agentCollectionsApi } from '../utils/api'
+import { useAuth } from '../context/AuthContext'
+import { useUserMap } from '../hooks/useUserMap'
+import UserGroupSection from '../components/UserGroupSection'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 export default function Collections() {
   const { addToast } = useOutletContext()
   const navigate = useNavigate()
+  const { t } = useTranslation('collections')
+  const { isAdmin, authEnabled, user } = useAuth()
+  const userMap = useUserMap()
   const [collections, setCollections] = useState([])
   const [loading, setLoading] = useState(true)
   const [newName, setNewName] = useState('')
   const [creating, setCreating] = useState(false)
+  const [userGroups, setUserGroups] = useState(null)
+  const [confirmDialog, setConfirmDialog] = useState(null)
 
   const fetchCollections = useCallback(async () => {
     try {
-      const data = await agentCollectionsApi.list()
+      const data = await agentCollectionsApi.list(isAdmin && authEnabled)
       setCollections(Array.isArray(data.collections) ? data.collections : [])
+      setUserGroups(data.user_groups || null)
     } catch (err) {
-      addToast(`Failed to load collections: ${err.message}`, 'error')
+      addToast(t('toasts.loadFailed', { message: err.message }), 'error')
     } finally {
       setLoading(false)
     }
-  }, [addToast])
+  }, [addToast, isAdmin, authEnabled, t])
 
   useEffect(() => {
     fetchCollections()
@@ -31,40 +42,56 @@ export default function Collections() {
     setCreating(true)
     try {
       await agentCollectionsApi.create(name)
-      addToast(`Collection "${name}" created`, 'success')
+      addToast(t('toasts.created', { name }), 'success')
       setNewName('')
       fetchCollections()
     } catch (err) {
-      addToast(`Failed to create collection: ${err.message}`, 'error')
+      addToast(t('toasts.createFailed', { message: err.message }), 'error')
     } finally {
       setCreating(false)
     }
   }
 
-  const handleDelete = async (name) => {
-    if (!window.confirm(`Delete collection "${name}"? This will remove all entries and cannot be undone.`)) return
-    try {
-      await agentCollectionsApi.reset(name)
-      addToast(`Collection "${name}" deleted`, 'success')
-      fetchCollections()
-    } catch (err) {
-      addToast(`Failed to delete collection: ${err.message}`, 'error')
-    }
+  const handleDelete = (name, userId) => {
+    setConfirmDialog({
+      title: t('deleteDialog.title'),
+      message: t('deleteDialog.message', { name }),
+      confirmLabel: t('deleteDialog.confirm'),
+      danger: true,
+      onConfirm: async () => {
+        setConfirmDialog(null)
+        try {
+          await agentCollectionsApi.reset(name, userId)
+          addToast(t('toasts.deleted', { name }), 'success')
+          fetchCollections()
+        } catch (err) {
+          addToast(t('toasts.deleteFailed', { message: err.message }), 'error')
+        }
+      },
+    })
   }
 
-  const handleReset = async (name) => {
-    if (!window.confirm(`Reset collection "${name}"? This will remove all entries but keep the collection.`)) return
-    try {
-      await agentCollectionsApi.reset(name)
-      addToast(`Collection "${name}" reset`, 'success')
-      fetchCollections()
-    } catch (err) {
-      addToast(`Failed to reset collection: ${err.message}`, 'error')
-    }
+  const handleReset = (name, userId) => {
+    setConfirmDialog({
+      title: t('resetDialog.title'),
+      message: t('resetDialog.message', { name }),
+      confirmLabel: t('resetDialog.confirm'),
+      danger: true,
+      onConfirm: async () => {
+        setConfirmDialog(null)
+        try {
+          await agentCollectionsApi.reset(name, userId)
+          addToast(t('toasts.reset', { name }), 'success')
+          fetchCollections()
+        } catch (err) {
+          addToast(t('toasts.resetFailed', { message: err.message }), 'error')
+        }
+      },
+    })
   }
 
   return (
-    <div className="page">
+    <div className="page page--wide">
       <style>{`
         .collections-create-bar {
           display: flex;
@@ -93,21 +120,21 @@ export default function Collections() {
       `}</style>
 
       <div className="page-header">
-        <h1 className="page-title">Knowledge Base</h1>
-        <p className="page-subtitle">Manage document collections for agent RAG</p>
+        <h1 className="page-title">{t('title')}</h1>
+        <p className="page-subtitle">{t('subtitle')}</p>
       </div>
 
       <div className="collections-create-bar">
         <input
           className="input"
           type="text"
-          placeholder="New collection name..."
+          placeholder={t('newPlaceholder')}
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') handleCreate() }}
         />
         <button className="btn btn-primary" onClick={handleCreate} disabled={creating || !newName.trim()}>
-          {creating ? <><i className="fas fa-spinner fa-spin" /> Creating...</> : <><i className="fas fa-plus" /> Create</>}
+          {creating ? <><i className="fas fa-spinner fa-spin" /> {t('actions.creating')}</> : <><i className="fas fa-plus" /> {t('actions.create')}</>}
         </button>
       </div>
 
@@ -115,30 +142,37 @@ export default function Collections() {
         <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--spacing-xl)' }}>
           <i className="fas fa-spinner fa-spin" style={{ fontSize: '2rem', color: 'var(--color-text-muted)' }} />
         </div>
-      ) : collections.length === 0 ? (
+      ) : collections.length === 0 && !userGroups ? (
         <div className="empty-state">
           <div className="empty-state-icon"><i className="fas fa-database" /></div>
-          <h2 className="empty-state-title">No collections yet</h2>
-          <p className="empty-state-text">Create a collection above to start building your knowledge base.</p>
+          <h2 className="empty-state-title">{t('empty.title')}</h2>
+          <p className="empty-state-text">
+            {t('empty.text')}
+          </p>
         </div>
       ) : (
+        <>
+        {userGroups && <h2 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: 'var(--spacing-md)' }}>{t('sections.yourCollections')}</h2>}
+        {collections.length === 0 ? (
+          <p style={{ color: 'var(--color-text-secondary)', marginBottom: 'var(--spacing-md)' }}>{t('empty.noPersonal')}</p>
+        ) : (
         <div className="collections-grid">
           {collections.map((collection) => {
             const name = typeof collection === 'string' ? collection : collection.name
             return (
-              <div className="card" key={name} style={{ cursor: 'pointer' }} onClick={() => navigate(`/collections/${encodeURIComponent(name)}`)}>
+              <div className="card" key={name} style={{ cursor: 'pointer' }} onClick={() => navigate(`/app/collections/${encodeURIComponent(name)}`)}>
                 <div className="collections-card-name">
                   <i className="fas fa-folder" style={{ marginRight: 'var(--spacing-xs)', color: 'var(--color-primary)' }} />
                   {name}
                 </div>
                 <div className="collections-card-actions" onClick={(e) => e.stopPropagation()}>
-                  <button className="btn btn-secondary btn-sm" onClick={() => navigate(`/collections/${encodeURIComponent(name)}`)} title="View details">
-                    <i className="fas fa-eye" /> Details
+                  <button className="btn btn-secondary btn-sm" onClick={() => navigate(`/app/collections/${encodeURIComponent(name)}`)} title={t('actions.viewDetails')}>
+                    <i className="fas fa-eye" /> {t('actions.details')}
                   </button>
-                  <button className="btn btn-secondary btn-sm" onClick={() => handleReset(name)} title="Reset collection">
-                    <i className="fas fa-rotate" /> Reset
+                  <button className="btn btn-secondary btn-sm" onClick={() => handleReset(name)} title={t('actions.resetCollection')}>
+                    <i className="fas fa-rotate" /> {t('actions.reset')}
                   </button>
-                  <button className="btn btn-danger btn-sm" onClick={() => handleDelete(name)} title="Delete collection">
+                  <button className="btn btn-danger btn-sm" onClick={() => handleDelete(name)} title={t('actions.deleteCollection')}>
                     <i className="fas fa-trash" />
                   </button>
                 </div>
@@ -146,7 +180,55 @@ export default function Collections() {
             )
           })}
         </div>
+        )}
+        </>
       )}
+
+      {userGroups && (
+        <UserGroupSection
+          title={t('sections.otherUsersCollections')}
+          userGroups={userGroups}
+          userMap={userMap}
+          currentUserId={user?.id}
+          itemKey="collections"
+          renderGroup={(items, userId) => (
+            <div className="collections-grid">
+              {(items || []).map((col) => {
+                const name = typeof col === 'string' ? col : col.name
+                return (
+                  <div className="card" key={name}>
+                    <div className="collections-card-name">
+                      <i className="fas fa-folder" style={{ marginRight: 'var(--spacing-xs)', color: 'var(--color-primary)' }} />
+                      {name}
+                    </div>
+                    <div className="collections-card-actions">
+                      <button className="btn btn-secondary btn-sm" onClick={() => navigate(`/app/collections/${encodeURIComponent(name)}?user_id=${encodeURIComponent(userId)}`)} title={t('actions.viewDetails')}>
+                        <i className="fas fa-eye" /> {t('actions.details')}
+                      </button>
+                      <button className="btn btn-secondary btn-sm" onClick={() => handleReset(name, userId)} title={t('actions.resetCollection')}>
+                        <i className="fas fa-rotate" /> {t('actions.reset')}
+                      </button>
+                      <button className="btn btn-danger btn-sm" onClick={() => handleDelete(name, userId)} title={t('actions.deleteCollection')}>
+                        <i className="fas fa-trash" />
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!confirmDialog}
+        title={confirmDialog?.title}
+        message={confirmDialog?.message}
+        confirmLabel={confirmDialog?.confirmLabel}
+        danger={confirmDialog?.danger}
+        onConfirm={confirmDialog?.onConfirm}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </div>
   )
 }

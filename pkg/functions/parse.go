@@ -111,6 +111,11 @@ type FunctionsConfig struct {
 	// If set, only this format will be tried (overrides XMLFormatPreset)
 	XMLFormat *XMLToolCallFormat `yaml:"xml_format,omitempty" json:"xml_format,omitempty"`
 
+	// AutomaticToolParsingFallback enables automatic tool call parsing fallback:
+	// - Wraps raw string arguments as {"query": raw_string} when JSON parsing fails
+	// - Parses tool calls from response content even when no tools were in the request
+	AutomaticToolParsingFallback bool `yaml:"automatic_tool_parsing_fallback,omitempty" json:"automatic_tool_parsing_fallback,omitempty"`
+
 	// DisablePEGParser disables the PEG parser and falls back to the legacy iterative parser
 	DisablePEGParser bool `yaml:"disable_peg_parser,omitempty" json:"disable_peg_parser,omitempty"`
 
@@ -144,14 +149,13 @@ type ToolFormatMarkers struct {
 	ArgsEnd        string
 
 	// JSON format fields
-	NameField        string
-	ArgsField        string
-	IDField          string
-	FunNameIsKey     bool
+	NameField         string
+	ArgsField         string
+	IDField           string
+	FunNameIsKey      bool
 	ToolsArrayWrapped bool
-	UsesPythonDicts  bool
-	FunctionField    string
-	ParameterOrder   []string
+	FunctionField     string
+	ParameterOrder    []string
 
 	// Generated ID field
 	GenIDField string
@@ -321,7 +325,17 @@ func ParseJSONIterative(s string, isPartial bool) ([]map[string]any, error) {
 		if jsonValue != nil {
 			// Convert to map[string]any if it's an object, or handle arrays
 			if obj, ok := jsonValue.(map[string]any); ok {
-				results = append(results, obj)
+				// Skip stub objects that healed away to nothing. Partial inputs
+				// like `{`, `{"`, or `{"n` go through parseJSONWithStack and
+				// come back as `{"<marker>":1}`; after removeHealingMarkerFromJSON
+				// drops the marker key the map is empty. Returning it as a
+				// real result trips the streaming tool-call detector
+				// (chat_stream_workers.go) into thinking a tool call landed,
+				// gating off content emission for the rest of the stream
+				// (issue #9988).
+				if !(isPartialJSON && len(obj) == 0) {
+					results = append(results, obj)
+				}
 			} else if arr, ok := jsonValue.([]any); ok {
 				// Handle arrays: extract objects from array
 				for _, item := range arr {
@@ -550,53 +564,117 @@ func getScopeOrToolStart(format *XMLToolCallFormat) string {
 	return format.ToolStart
 }
 
+// ParseResult holds tool calls and any non-tool-call content extracted by the parser.
+type ParseResult struct {
+	ToolCalls []FuncCallResults
+	Content   string
+}
+
 // tryParseXMLFromScopeStart finds the first occurrence of scopeStart (or format.ToolStart),
-// splits the input there, and parses only the suffix as XML tool calls. Returns (toolCalls, true)
-// if any tool calls were parsed, else (nil, false). This mimics llama.cpp's PEG order so that
+// splits the input there, and parses only the suffix as XML tool calls. Returns (result, true)
+// if any tool calls were parsed, else (empty, false). This mimics llama.cpp's PEG order so that
 // reasoning or content before the tool block does not cause "whitespace only before scope" to fail.
-func tryParseXMLFromScopeStart(s string, format *XMLToolCallFormat, isPartial bool) ([]FuncCallResults, bool) {
+func tryParseXMLFromScopeStart(s string, format *XMLToolCallFormat, isPartial bool) (ParseResult, bool) {
 	if format == nil {
-		return nil, false
+		return ParseResult{}, false
 	}
 	scopeStart := getScopeOrToolStart(format)
 	if scopeStart == "" {
-		return nil, false
+		return ParseResult{}, false
 	}
 	idx := strings.Index(s, scopeStart)
 	if idx < 0 {
-		return nil, false
+		return ParseResult{}, false
 	}
 	toolCallsPart := s[idx:]
 	parser := NewChatMsgParser(toolCallsPart, isPartial)
 	success, err := parser.TryConsumeXMLToolCalls(format)
 	if err != nil {
 		if _, ok := err.(*ChatMsgPartialException); ok && isPartial {
-			return parser.ToolCalls(), len(parser.ToolCalls()) > 0
+			tc := parser.ToolCalls()
+			if len(tc) > 0 {
+				return ParseResult{ToolCalls: tc, Content: buildContent(s[:idx], parser)}, true
+			}
 		}
-		return nil, false
+		return ParseResult{}, false
 	}
 	if success && len(parser.ToolCalls()) > 0 {
-		return parser.ToolCalls(), true
+		return ParseResult{
+			ToolCalls: parser.ToolCalls(),
+			Content:   buildContent(s[:idx], parser),
+		}, true
 	}
-	return nil, false
+	return ParseResult{}, false
+}
+
+// buildContent assembles the non-tool-call content from the text before the tool
+// block, any content tracked by the parser, and any unconsumed trailing text.
+func buildContent(before string, parser *ChatMsgParser) string {
+	var parts []string
+	if b := strings.TrimSpace(before); b != "" {
+		parts = append(parts, b)
+	}
+	if pc := strings.TrimSpace(parser.Content()); pc != "" {
+		parts = append(parts, pc)
+	}
+	remaining := parser.Input()[parser.Pos():]
+	if t := strings.TrimSpace(remaining); t != "" {
+		parts = append(parts, t)
+	}
+	return strings.Join(parts, " ")
 }
 
 // ParseXMLIterative parses XML tool calls using the iterative parser
 // This provides better streaming and partial parsing support.
 // When format is nil or when format is set, tries "find scope/tool start, split, parse suffix"
 // first (llama.cpp PEG order) so that content before the tool block does not cause parse failure.
+// validToolNameRe matches a plausible function name. OpenAI tool names are
+// limited to letters, digits, underscores and hyphens; dots appear in some
+// providers' namespaced names. Anything else (whitespace, braces, brackets,
+// quotes, colons) signals the XML auto-detector grabbed a JSON blob or prose
+// rather than a real name.
+var validToolNameRe = regexp.MustCompile(`^[A-Za-z0-9_.\-]+$`)
+
+// plausibleToolName reports whether name looks like a real function name.
+func plausibleToolName(name string) bool {
+	return validToolNameRe.MatchString(strings.TrimSpace(name))
+}
+
+// filterPlausibleToolCalls drops auto-detected tool calls whose name is not a
+// plausible function name. This guards against a format (notably glm-4.5, whose
+// tool block is <tool_call>name...</tool_call>) mis-claiming a Hermes-style
+// <tool_call>JSON</tool_call> block and returning the whole JSON object — or
+// any leading prose / array — as the function name. Dropping the misparse lets
+// auto-detection fall through to the next format and ultimately to JSON
+// parsing, which handles Hermes correctly. Replaces the narrower leading-"{"
+// check (PR #9940); see issue #9722.
+func filterPlausibleToolCalls(calls []FuncCallResults) []FuncCallResults {
+	out := calls[:0:0]
+	for _, c := range calls {
+		if plausibleToolName(c.Name) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func ParseXMLIterative(s string, format *XMLToolCallFormat, isPartial bool) ([]FuncCallResults, error) {
 	// Try split-on-scope first so reasoning/content before tool block is skipped
 	if format != nil {
-		if results, ok := tryParseXMLFromScopeStart(s, format, isPartial); ok {
-			return results, nil
+		if pr, ok := tryParseXMLFromScopeStart(s, format, isPartial); ok {
+			return pr.ToolCalls, nil
 		}
 	} else {
 		formats := getAllXMLFormats()
 		for _, fmtPreset := range formats {
 			if fmtPreset.format != nil {
-				if results, ok := tryParseXMLFromScopeStart(s, fmtPreset.format, isPartial); ok {
-					return results, nil
+				if pr, ok := tryParseXMLFromScopeStart(s, fmtPreset.format, isPartial); ok {
+					// Auto-detect: discard misparsed (non-name) results so a
+					// format that grabbed a JSON blob doesn't win; fall through
+					// to the next format.
+					if valid := filterPlausibleToolCalls(pr.ToolCalls); len(valid) > 0 {
+						return valid, nil
+					}
 				}
 			}
 		}
@@ -616,14 +694,19 @@ func ParseXMLIterative(s string, format *XMLToolCallFormat, isPartial bool) ([]F
 				if err != nil {
 					// Check if it's a partial exception (recoverable)
 					if _, ok := err.(*ChatMsgPartialException); ok {
-						// Partial parse, return what we have
-						return parser.ToolCalls(), nil
+						// Partial parse, return what we have — unless every
+						// result is a misparse, in which case try the next format.
+						if valid := filterPlausibleToolCalls(parser.ToolCalls()); len(valid) > 0 {
+							return valid, nil
+						}
 					}
 					// Try next format
 					continue
 				}
 				if success && len(parser.ToolCalls()) > 0 {
-					return parser.ToolCalls(), nil
+					if valid := filterPlausibleToolCalls(parser.ToolCalls()); len(valid) > 0 {
+						return valid, nil
+					}
 				}
 			}
 		}
@@ -787,7 +870,6 @@ func genPartialJSON(args map[string]any, functionName string, rest string, needl
 	return jsonStr, false
 }
 
-
 // parseParameterValue parses a parameter value based on format configuration
 // Implements JSON-first parsing: tries JSON parsing first (if raw_argval is false/null),
 // validates JSON is complete, then falls back to text parsing.
@@ -886,8 +968,17 @@ func ParseFunctionCall(llmresult string, functionConfig FunctionsConfig) []FuncC
 				// Marshal arguments to JSON string (handles both object and string cases)
 				var d []byte
 				if argsStr, ok := args.(string); ok {
-					// Already a string, use it directly
-					d = []byte(argsStr)
+					// Check if the string is valid JSON; if not, auto-heal if enabled
+					var testJSON map[string]any
+					if json.Unmarshal([]byte(argsStr), &testJSON) == nil {
+						d = []byte(argsStr)
+					} else if functionConfig.AutomaticToolParsingFallback {
+						healed := map[string]string{"query": argsStr}
+						d, _ = json.Marshal(healed)
+						xlog.Debug("Automatic tool parsing fallback: wrapped raw string arguments", "raw", argsStr)
+					} else {
+						d = []byte(argsStr)
+					}
 				} else {
 					// Object, marshal to JSON
 					d, _ = json.Marshal(args)

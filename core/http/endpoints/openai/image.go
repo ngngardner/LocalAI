@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,15 +15,18 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+
 	"github.com/mudler/LocalAI/core/config"
 	"github.com/mudler/LocalAI/core/http/middleware"
 	"github.com/mudler/LocalAI/core/schema"
 
 	"github.com/mudler/LocalAI/core/backend"
 
+	"github.com/mudler/xlog"
+
+	"github.com/mudler/LocalAI/pkg/httpclient"
 	model "github.com/mudler/LocalAI/pkg/model"
 	"github.com/mudler/LocalAI/pkg/utils"
-	"github.com/mudler/xlog"
 )
 
 func downloadFile(url string) (string, error) {
@@ -33,7 +35,7 @@ func downloadFile(url string) (string, error) {
 	}
 
 	// Get the data
-	resp, err := http.Get(url)
+	resp, err := httpclient.New(httpclient.WithFollowRedirects()).Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -68,6 +70,7 @@ func downloadFile(url string) (string, error) {
 */
 // ImageEndpoint is the OpenAI Image generation API endpoint https://platform.openai.com/docs/api-reference/images/create
 // @Summary Creates an image given a prompt.
+// @Tags images
 // @Param request body schema.OpenAIRequest true "query params"
 // @Success 200 {object} schema.OpenAIResponse "Response"
 // @Router /v1/images/generations [post]
@@ -154,7 +157,7 @@ func ImageEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, appConfi
 			if input.N == 0 {
 				n = 1
 			}
-			for j := 0; j < n; j++ {
+			for range n {
 				prompts := strings.Split(i, "|")
 				positive_prompt := prompts[0]
 				negative_prompt := ""
@@ -197,7 +200,7 @@ func ImageEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, appConfi
 					inputSrc = inputImages[0]
 				}
 
-				fn, err := backend.ImageGeneration(height, width, step, *config.Seed, positive_prompt, negative_prompt, inputSrc, output, ml, *config, appConfig, refImages)
+				fn, err := backend.ImageGeneration(c.Request().Context(), height, width, step, *config.Seed, positive_prompt, negative_prompt, inputSrc, output, ml, *config, appConfig, refImages)
 				if err != nil {
 					return err
 				}
@@ -232,7 +235,7 @@ func ImageEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, appConfi
 			ID:      id,
 			Created: created,
 			Data:    result,
-			Usage: schema.OpenAIUsage{
+			Usage: &schema.OpenAIUsage{
 				PromptTokens:     0,
 				CompletionTokens: 0,
 				TotalTokens:      0,

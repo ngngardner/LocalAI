@@ -22,6 +22,10 @@ import backend_pb2
 import backend_pb2_grpc
 
 import grpc
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'common'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'common'))
+from grpc_auth import get_auth_interceptors
+
 
 # Import dynamic loader for pipeline discovery
 from diffusers_dynamic_loader import (
@@ -36,7 +40,19 @@ from diffusers import DiffusionPipeline, ControlNetModel
 from diffusers import FluxPipeline, FluxTransformer2DModel, AutoencoderKLWan
 from diffusers.pipelines.stable_diffusion import safety_checker
 from diffusers.utils import load_image, export_to_video
-from compel import Compel, ReturnedEmbeddingsType
+# TODO: re-enable compel as a hard dependency once it supports transformers >= 5.
+# Tracking upstream: https://github.com/damian0815/compel/pull/129
+# and https://github.com/damian0815/compel/issues/128
+# Until then compel pins transformers ~= 4.25, which forces the pip resolver into
+# multi-hour backtracking storms in CI when DEPS_REFRESH rotates the cache.
+# Keep the import optional and gate usage on the COMPEL env var (set COMPEL=1 to opt in).
+try:
+    from compel import Compel, ReturnedEmbeddingsType
+    COMPEL_AVAILABLE = True
+except ImportError:
+    Compel = None
+    ReturnedEmbeddingsType = None
+    COMPEL_AVAILABLE = False
 from optimum.quanto import freeze, qfloat8, quantize
 from transformers import T5EncoderModel
 from safetensors.torch import load_file
@@ -62,6 +78,9 @@ from diffusers import LTX2VideoTransformer3DModel, GGUFQuantizationConfig
 
 _ONE_DAY_IN_SECONDS = 60 * 60 * 24
 COMPEL = os.environ.get("COMPEL", "0") == "1"
+if COMPEL and not COMPEL_AVAILABLE:
+    print("WARNING: COMPEL is enabled but the compel module is not installed. Install it manually (`pip install compel`) or unset COMPEL. Falling back to standard prompt processing.", file=sys.stderr)
+    COMPEL = False
 SD_EMBED = os.environ.get("SD_EMBED", "0") == "1"
 # Warn if SD_EMBED is enabled but the module is not available
 if SD_EMBED and not SD_EMBED_AVAILABLE:
@@ -1042,7 +1061,9 @@ def serve(address):
             ('grpc.max_message_length', 50 * 1024 * 1024),  # 50MB
             ('grpc.max_send_message_length', 50 * 1024 * 1024),  # 50MB
             ('grpc.max_receive_message_length', 50 * 1024 * 1024),  # 50MB
-        ])
+        ],
+        interceptors=get_auth_interceptors(),
+    )
     backend_pb2_grpc.add_BackendServicer_to_server(BackendServicer(), server)
     server.add_insecure_port(address)
     server.start()

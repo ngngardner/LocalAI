@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -22,7 +23,7 @@ var (
 )
 
 func (ml *ModelLoader) deleteProcess(s string) error {
-	model, ok := ml.models[s]
+	model, ok := ml.store.Get(s)
 	if !ok {
 		xlog.Debug("Model not found", "model", s)
 		return modelNotFoundErr
@@ -52,28 +53,38 @@ func (ml *ModelLoader) deleteProcess(s string) error {
 	}
 
 	// Free GPU resources before stopping the process to ensure VRAM is released
-	if freeFunc, ok := model.GRPC(false, ml.wd).(interface{ Free() error }); ok {
-		xlog.Debug("Calling Free() to release GPU resources", "model", s)
-		if err := freeFunc.Free(); err != nil {
-			xlog.Warn("Error freeing GPU resources", "error", err, "model", s)
-		}
+	xlog.Debug("Calling Free() to release GPU resources", "model", s)
+	if err := model.GRPC(false, ml.wd).Free(context.Background()); err != nil {
+		xlog.Warn("Error freeing GPU resources", "error", err, "model", s)
 	}
 
 	process := model.Process()
 	if process == nil {
-		xlog.Error("No process", "model", s)
-		// Nothing to do as there is no process
-		delete(ml.models, s)
+		// No local process — this is a remote/external backend.
+		// In distributed mode, delegate to the remote unloader to tell
+		// the backend node to free the model (GPU resources, etc.).
+		if ml.remoteUnloader != nil {
+			xlog.Debug("Delegating model unload to remote unloader", "model", s)
+			if err := ml.remoteUnloader.UnloadRemoteModel(s); err != nil {
+				xlog.Warn("Remote model unload failed", "model", s, "error", err)
+			}
+		} else {
+			xlog.Debug("No local process and no remote unloader", "model", s)
+		}
+		ml.store.Delete(s)
 		return nil
 	}
 
+	// Mark the stop as intentional so the exit-watcher logs it as an
+	// expected stop, not a crash (signal-terminated children report -1).
+	ml.stoppingProcs.Store(process, struct{}{})
 	err := process.Stop()
 	if err != nil {
 		xlog.Error("(deleteProcess) error while deleting process", "error", err, "model", s)
 	}
 
 	if err == nil {
-		delete(ml.models, s)
+		ml.store.Delete(s)
 	}
 
 	return err
@@ -83,11 +94,17 @@ func (ml *ModelLoader) StopGRPC(filter GRPCProcessFilter) error {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
 
-	for k, m := range ml.models {
+	// Collect matching keys first — can't mutate store during Range
+	var toDelete []string
+	ml.store.Range(func(k string, m *Model) bool {
 		if filter(k, m.Process()) {
-			e := ml.deleteProcess(k)
-			err = errors.Join(err, e)
+			toDelete = append(toDelete, k)
 		}
+		return true
+	})
+	for _, k := range toDelete {
+		e := ml.deleteProcess(k)
+		err = errors.Join(err, e)
 	}
 	return err
 }
@@ -99,7 +116,7 @@ func (ml *ModelLoader) StopAllGRPC() error {
 func (ml *ModelLoader) GetGRPCPID(id string) (int, error) {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
-	p, exists := ml.models[id]
+	p, exists := ml.store.Get(id)
 	if !exists {
 		return -1, fmt.Errorf("no grpc backend found for %s", id)
 	}
@@ -107,6 +124,13 @@ func (ml *ModelLoader) GetGRPCPID(id string) (int, error) {
 		return -1, fmt.Errorf("no grpc backend found for %s", id)
 	}
 	return strconv.Atoi(p.Process().PID)
+}
+
+// StartProcess starts a gRPC backend process and returns its process handle.
+// This is the public wrapper for the internal startProcess method, used by
+// the serve-backend CLI subcommand to start a backend on a specified address.
+func (ml *ModelLoader) StartProcess(grpcProcess, id string, serverAddress string, args ...string) (*process.Process, error) {
+	return ml.startProcess(grpcProcess, id, serverAddress, args...)
 }
 
 func (ml *ModelLoader) startProcess(grpcProcess, id string, serverAddress string, args ...string) (*process.Process, error) {
@@ -150,8 +174,16 @@ func (ml *ModelLoader) startProcess(grpcProcess, id string, serverAddress string
 	xlog.Debug("GRPC Service state dir", "dir", grpcControlProcess.StateDir())
 
 	signals.RegisterGracefulTerminationHandler(func() {
-		err := grpcControlProcess.Stop()
-		if err != nil {
+		// StopAllGRPC (the deleteProcess path) is registered earlier and runs
+		// first for store-tracked backends, stopping this process and removing
+		// its pidfile. Calling Stop again then fails with "failed to read PID".
+		// Skip when it's already gone; this handler still covers processes that
+		// StopAllGRPC doesn't track (e.g. worker-supervised backends).
+		if !grpcControlProcess.IsAlive() {
+			return
+		}
+		ml.stoppingProcs.Store(grpcControlProcess, struct{}{})
+		if err := grpcControlProcess.Stop(); err != nil {
 			xlog.Error("error while shutting down grpc process", "error", err)
 		}
 	})
@@ -159,19 +191,59 @@ func (ml *ModelLoader) startProcess(grpcProcess, id string, serverAddress string
 	go func() {
 		t, err := tail.TailFile(grpcControlProcess.StderrPath(), tail.Config{Follow: true})
 		if err != nil {
-			xlog.Debug("Could not tail stderr")
+			xlog.Error("Could not tail stderr", "process", grpcProcess)
+			return
 		}
 		for line := range t.Lines {
 			xlog.Debug("GRPC stderr", "id", strings.Join([]string{id, serverAddress}, "-"), "line", line.Text)
+			if ml.backendLogs != nil && ml.backendLoggingEnabled.Load() {
+				ml.backendLogs.AppendLine(id, "stderr", line.Text)
+			}
 		}
 	}()
 	go func() {
 		t, err := tail.TailFile(grpcControlProcess.StdoutPath(), tail.Config{Follow: true})
 		if err != nil {
-			xlog.Debug("Could not tail stdout")
+			xlog.Error("Could not tail stdout", "process", grpcProcess)
+			return
 		}
 		for line := range t.Lines {
 			xlog.Debug("GRPC stdout", "id", strings.Join([]string{id, serverAddress}, "-"), "line", line.Text)
+			if ml.backendLogs != nil && ml.backendLoggingEnabled.Load() {
+				ml.backendLogs.AppendLine(id, "stdout", line.Text)
+			}
+		}
+	}()
+
+	// Surface backend exits in the log. Without this, a crash (SIGSEGV
+	// from a missing shared library, a Python ImportError, etc.) is
+	// invisible at every log level — the only signal is a delayed
+	// "connection refused" from the gRPC dial, which doesn't say
+	// whether the child is alive.
+	go func() {
+		<-grpcControlProcess.Done()
+		// LoadAndDelete both reads the intentional-stop marker and frees the
+		// map entry so it doesn't accumulate across the process's lifetime.
+		_, intentional := ml.stoppingProcs.LoadAndDelete(grpcControlProcess)
+		fields := []any{
+			"id", id,
+			"address", serverAddress,
+			"process", filepath.Base(grpcProcess),
+		}
+		// Report the raw exit code without interpreting it: a child killed by
+		// our own SIGTERM/SIGKILL surfaces as -1 (Go reports -1 for signal
+		// termination, not the shell's 128+signal convention), so the code
+		// alone can't tell an intended stop from a crash. The stoppingProcs
+		// marker is the reliable signal for that, so it picks the log level.
+		if code, codeErr := grpcControlProcess.ExitCode(); codeErr == nil {
+			fields = append(fields, "exitCode", code)
+		}
+		if intentional {
+			xlog.Info("Backend process stopped", fields...)
+		} else {
+			// A stop we didn't initiate — a SIGSEGV from a missing shared
+			// library, a Python ImportError, an OOM kill, an unexpected self-exit.
+			xlog.Warn("Backend process exited unexpectedly", fields...)
 		}
 	}()
 

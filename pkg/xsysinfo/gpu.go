@@ -1,8 +1,11 @@
 package xsysinfo
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -18,6 +21,7 @@ const (
 	VendorNVIDIA  = "nvidia"
 	VendorAMD     = "amd"
 	VendorIntel   = "intel"
+	VendorApple   = "apple"
 	VendorVulkan  = "vulkan"
 	VendorUnknown = "unknown"
 )
@@ -28,7 +32,8 @@ const (
 var UnifiedMemoryDevices = []string{
 	"NVIDIA GB10",
 	"GB10",
-	// Add more unified memory devices here as needed
+	"NVIDIA Thor",
+	"Thor",
 }
 
 // GPUMemoryInfo contains real-time GPU memory usage information
@@ -36,6 +41,13 @@ type GPUMemoryInfo struct {
 	Index        int     `json:"index"`
 	Name         string  `json:"name"`
 	Vendor       string  `json:"vendor"`
+	// BDF is the canonical PCI bus address (dddd:bb:dd.f) when known.
+	// Populated by detection paths that can attribute the device to a
+	// PCI location (clinfo, future amdgpu/nvidia paths); empty for
+	// non-PCI devices (Apple, integrated SoCs) or detection paths
+	// that don't surface it (nvidia-smi --query-gpu doesn't include
+	// pci.bus_id by default).
+	BDF          string  `json:"bdf,omitempty"`
 	TotalVRAM    uint64  `json:"total_vram"`    // Total VRAM in bytes
 	UsedVRAM     uint64  `json:"used_vram"`     // Used VRAM in bytes
 	FreeVRAM     uint64  `json:"free_vram"`     // Free VRAM in bytes
@@ -69,23 +81,16 @@ type ResourceInfo struct {
 	Aggregate AggregateMemoryInfo `json:"aggregate"`
 }
 
-var (
-	gpuCache     []*gpu.GraphicsCard
-	gpuCacheOnce sync.Once
-	gpuCacheErr  error
-)
+var gpusOnce = sync.OnceValues(func() ([]*gpu.GraphicsCard, error) {
+	gpu, err := ghw.GPU()
+	if err != nil {
+		return nil, err
+	}
+	return gpu.GraphicsCards, nil
+})
 
 func GPUs() ([]*gpu.GraphicsCard, error) {
-	gpuCacheOnce.Do(func() {
-		gpu, err := ghw.GPU()
-		if err != nil {
-			gpuCacheErr = err
-			return
-		}
-		gpuCache = gpu.GraphicsCards
-	})
-
-	return gpuCache, gpuCacheErr
+	return gpusOnce()
 }
 
 func TotalAvailableVRAM() (uint64, error) {
@@ -190,10 +195,23 @@ func DetectGPUVendor() (string, error) {
 		return VendorIntel, nil
 	}
 
+	// Check for NVIDIA integrated GPU (Tegra / DGX Spark / Thor) —
+	// nvidia-smi may be absent or unreliable on these unified-memory SoCs.
+	if isNVIDIAIntegratedGPU() {
+		xlog.Debug("GPU vendor detected via NVIDIA SoC", "vendor", VendorNVIDIA)
+		return VendorNVIDIA, nil
+	}
+
 	// Check for vulkaninfo (Vulkan - lowest priority as it can detect any GPU)
 	if _, err := exec.LookPath("vulkaninfo"); err == nil {
 		xlog.Debug("GPU vendor detected via binary", "vendor", VendorVulkan, "binary", "vulkaninfo")
 		return VendorVulkan, nil
+	}
+
+	// Check for Apple Silicon (macOS)
+	if appleGPUs := getAppleGPUMemory(); len(appleGPUs) > 0 {
+		xlog.Debug("GPU vendor detected via system_profiler", "vendor", VendorApple)
+		return VendorApple, nil
 	}
 
 	// No vendor detected
@@ -246,10 +264,24 @@ func GetGPUMemoryUsage() []GPUMemoryInfo {
 		gpus = append(gpus, intelGPUs...)
 	}
 
+	// Try NVIDIA integrated GPUs (Tegra Jetson, DGX Spark, Thor — unified memory).
+	// These either lack nvidia-smi or have it behave unreliably, so we detect
+	// them via SoC sysfs and report system RAM figures.
+	if len(gpus) == 0 {
+		integratedGPUs := getNVIDIAIntegratedGPUMemory()
+		gpus = append(gpus, integratedGPUs...)
+	}
+
 	// Try Vulkan as fallback for device detection (limited real-time data)
 	if len(gpus) == 0 {
 		vulkanGPUs := getVulkanGPUMemory()
 		gpus = append(gpus, vulkanGPUs...)
+	}
+
+	// Try Apple Silicon (macOS only)
+	if len(gpus) == 0 {
+		appleGPUs := getAppleGPUMemory()
+		gpus = append(gpus, appleGPUs...)
 	}
 
 	return gpus
@@ -345,18 +377,45 @@ func getNVIDIAGPUMemory() []GPUMemoryInfo {
 				usagePercent = float64(usedBytes) / float64(totalBytes) * 100
 			}
 		} else if isNA {
-			// Unknown device with N/A values - skip memory info
-			xlog.Debug("nvidia-smi returned N/A for unknown device", "device", name)
-			gpus = append(gpus, GPUMemoryInfo{
-				Index:        idx,
-				Name:         name,
-				Vendor:       VendorNVIDIA,
-				TotalVRAM:    0,
-				UsedVRAM:     0,
-				FreeVRAM:     0,
-				UsagePercent: 0,
-			})
-			continue
+			// Check if this is an NVIDIA integrated / unified-memory SoC — if so,
+			// fall back to system RAM (covers Jetson, DGX Spark/GB10, Thor).
+			if isNVIDIAIntegratedGPU() {
+				xlog.Debug("nvidia-smi returned N/A on NVIDIA integrated GPU, using system RAM", "device", name)
+				sysInfo, err := GetSystemRAMInfo()
+				if err != nil {
+					xlog.Debug("failed to get system RAM for NVIDIA integrated GPU", "error", err, "device", name)
+					gpus = append(gpus, GPUMemoryInfo{
+						Index:        idx,
+						Name:         name,
+						Vendor:       VendorNVIDIA,
+						TotalVRAM:    0,
+						UsedVRAM:     0,
+						FreeVRAM:     0,
+						UsagePercent: 0,
+					})
+					continue
+				}
+
+				totalBytes = sysInfo.Total
+				usedBytes = sysInfo.Used
+				freeBytes = sysInfo.Free
+				if totalBytes > 0 {
+					usagePercent = float64(usedBytes) / float64(totalBytes) * 100
+				}
+			} else {
+				// Truly unknown device with N/A values - skip memory info
+				xlog.Debug("nvidia-smi returned N/A for unknown device", "device", name)
+				gpus = append(gpus, GPUMemoryInfo{
+					Index:        idx,
+					Name:         name,
+					Vendor:       VendorNVIDIA,
+					TotalVRAM:    0,
+					UsedVRAM:     0,
+					FreeVRAM:     0,
+					UsagePercent: 0,
+				})
+				continue
+			}
 		} else {
 			// Normal GPU with dedicated VRAM
 			totalMB, _ := strconv.ParseFloat(totalStr, 64)
@@ -463,16 +522,48 @@ func getAMDGPUMemory() []GPUMemoryInfo {
 	return gpus
 }
 
-// getIntelGPUMemory queries Intel GPUs using xpu-smi or intel_gpu_top
+// getIntelGPUMemory queries Intel GPUs via xpu-smi, intel_gpu_top, or
+// clinfo (in that order). xpu-smi is the canonical Intel tool but
+// requires the separate xpumanager package; clinfo ships with the
+// OpenCL ICD loader and is present in most oneAPI base images, so it
+// serves as the last-resort fallback.
 func getIntelGPUMemory() []GPUMemoryInfo {
-	// Try xpu-smi first (Intel's official GPU management tool)
-	gpus := getIntelXPUSMI()
-	if len(gpus) > 0 {
+	if gpus := getIntelXPUSMI(); len(gpus) > 0 {
 		return gpus
 	}
+	if gpus := getIntelGPUTop(); len(gpus) > 0 {
+		return gpus
+	}
+	// clinfo enumerates every OpenCL platform, so guard the
+	// subprocess with the cached ghw GPU list: non-Intel hosts skip
+	// it entirely.
+	if !hasGHWVendor(VendorIntel) {
+		return nil
+	}
+	var out []GPUMemoryInfo
+	for _, g := range getCLInfoGPUMemory() {
+		if g.Vendor == VendorIntel {
+			out = append(out, g)
+		}
+	}
+	return out
+}
 
-	// Fallback to intel_gpu_top
-	return getIntelGPUTop()
+// hasGHWVendor reports whether ghw observed any GPU whose vendor name
+// matches (case-insensitive substring). Uses the package-level cache
+// in GPUs() so the call is free after the first invocation.
+func hasGHWVendor(vendor string) bool {
+	gpus, _ := GPUs()
+	target := strings.ToUpper(vendor)
+	for _, g := range gpus {
+		if g.DeviceInfo == nil || g.DeviceInfo.Vendor == nil {
+			continue
+		}
+		if strings.Contains(strings.ToUpper(g.DeviceInfo.Vendor.Name), target) {
+			return true
+		}
+	}
+	return false
 }
 
 // getIntelXPUSMI queries Intel GPUs using xpu-smi
@@ -591,7 +682,7 @@ func getIntelGPUTop() []GPUMemoryInfo {
 	}
 
 	var result struct {
-		Engines map[string]interface{} `json:"engines"`
+		Engines map[string]any `json:"engines"`
 		// Memory info if available
 	}
 
@@ -603,6 +694,97 @@ func getIntelGPUTop() []GPUMemoryInfo {
 	// intel_gpu_top doesn't always provide memory info
 	// Return empty if we can't get useful data
 	return nil
+}
+
+// isNVIDIAIntegratedGPU reports whether the host is an NVIDIA SoC with an
+// integrated GPU that shares system RAM (unified memory). Covers the Jetson
+// Tegra family (Orin, Xavier, Nano, AGX Thor) and SBSA-style NVIDIA SoCs such
+// as the DGX Spark (GB10). nvidia-smi may be absent or unreliable on these
+// hosts (notably when running under docker without NVML capability), so we
+// detect via sysfs. Works both on the host and inside containers that mount
+// /sys normally.
+func isNVIDIAIntegratedGPU() bool {
+	if data, err := os.ReadFile("/sys/devices/soc0/family"); err == nil {
+		if strings.TrimSpace(string(data)) == "Tegra" {
+			return true
+		}
+	}
+	if data, err := os.ReadFile("/sys/devices/soc0/soc_id"); err == nil {
+		// JEDEC manufacturer 0x0426 = NVIDIA ("jep106:0426[:<soc>]").
+		if strings.HasPrefix(strings.TrimSpace(string(data)), "jep106:0426") {
+			return true
+		}
+	}
+	return false
+}
+
+// nvidiaIntegratedGPUName derives a human-readable device name for an NVIDIA
+// unified-memory SoC without relying on nvidia-smi. Priority: device-tree
+// model (populated on Jetson) → soc0/machine (some Jetson devkits) → soc_id
+// lookup (SBSA SoCs expose JEDEC IDs) → generic fallbacks.
+func nvidiaIntegratedGPUName() string {
+	if data, err := os.ReadFile("/proc/device-tree/model"); err == nil {
+		if s := strings.TrimRight(string(data), "\x00 \n"); s != "" {
+			return s
+		}
+	}
+	if data, err := os.ReadFile("/sys/devices/soc0/machine"); err == nil {
+		if s := strings.TrimSpace(string(data)); s != "" {
+			return s
+		}
+	}
+	if data, err := os.ReadFile("/sys/devices/soc0/soc_id"); err == nil {
+		s := strings.TrimSpace(string(data))
+		switch {
+		case strings.HasPrefix(s, "jep106:0426:8901"):
+			return "NVIDIA GB10"
+		case strings.HasPrefix(s, "jep106:0426"):
+			return "NVIDIA iGPU"
+		}
+	}
+	if data, err := os.ReadFile("/sys/devices/soc0/family"); err == nil {
+		if strings.TrimSpace(string(data)) == "Tegra" {
+			return "NVIDIA Jetson"
+		}
+	}
+	return "NVIDIA iGPU"
+}
+
+// getNVIDIAIntegratedGPUMemory detects NVIDIA unified-memory integrated GPUs
+// (Jetson, DGX Spark/GB10, Thor) and reports system RAM figures as VRAM.
+// Used as a fallback when nvidia-smi is missing or failing.
+func getNVIDIAIntegratedGPUMemory() []GPUMemoryInfo {
+	if !isNVIDIAIntegratedGPU() {
+		return nil
+	}
+
+	name := nvidiaIntegratedGPUName()
+
+	ramInfo, err := GetSystemRAMInfo()
+	if err != nil {
+		xlog.Debug("NVIDIA integrated GPU detected but failed to get system RAM", "error", err, "device", name)
+		return []GPUMemoryInfo{{
+			Index:  0,
+			Name:   name,
+			Vendor: VendorNVIDIA,
+		}}
+	}
+
+	usagePercent := 0.0
+	if ramInfo.Total > 0 {
+		usagePercent = float64(ramInfo.Used) / float64(ramInfo.Total) * 100
+	}
+
+	xlog.Debug("NVIDIA integrated GPU detected (unified memory)", "device", name, "total_ram", ramInfo.Total)
+	return []GPUMemoryInfo{{
+		Index:        0,
+		Name:         name,
+		Vendor:       VendorNVIDIA,
+		TotalVRAM:    ramInfo.Total,
+		UsedVRAM:     ramInfo.Used,
+		FreeVRAM:     ramInfo.Free,
+		UsagePercent: usagePercent,
+	}}
 }
 
 // GetResourceInfo returns GPU info if available, otherwise system RAM info
@@ -660,14 +842,15 @@ func GetResourceAggregateInfo() AggregateMemoryInfo {
 	return resourceInfo.Aggregate
 }
 
-// getVulkanGPUMemory queries GPUs using vulkaninfo as a fallback
-// Note: Vulkan provides memory heap info but not real-time usage
+// getVulkanGPUMemory queries GPUs using vulkaninfo as a fallback.
+// Note: vulkaninfo JSON is a Vulkan Profiles export and does not include
+// VkPhysicalDeviceMemoryProperties, so memory heaps are parsed from text output.
 func getVulkanGPUMemory() []GPUMemoryInfo {
 	if _, err := exec.LookPath("vulkaninfo"); err != nil {
 		return nil
 	}
 
-	cmd := exec.Command("vulkaninfo", "--json")
+	cmd := exec.Command("vulkaninfo", "--text")
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -678,54 +861,282 @@ func getVulkanGPUMemory() []GPUMemoryInfo {
 		return nil
 	}
 
-	// Parse Vulkan JSON output
+	return parseVulkanGPUMemoryText(strings.NewReader(stdout.String()))
+
+}
+
+type vulkanGPUTextInfo struct {
+	index        int
+	name         string
+	deviceType   string
+	totalVRAM    uint64
+	budgetVRAM   uint64
+	usageVRAM    uint64
+}
+
+func parseVulkanGPUMemoryText(r io.Reader) []GPUMemoryInfo {
+	var gpus []GPUMemoryInfo
+	var current *vulkanGPUTextInfo
+
+	inMemoryProperties := false
+	inMemoryHeaps := false
+	inHeap := false
+	heapSize := uint64(0)
+	heapBudget := uint64(0)
+	heapUsage := uint64(0)
+	heapDeviceLocal := false
+
+	flushHeap := func() {
+		if current != nil && inHeap && heapDeviceLocal {
+			current.totalVRAM += heapSize
+			current.usageVRAM += heapUsage
+			current.budgetVRAM += heapBudget
+		}
+		heapSize = 0
+		heapBudget = 0
+		heapUsage = 0
+		heapDeviceLocal = false
+		inHeap = false
+	}
+
+	flushGPU := func() {
+		if current == nil || current.totalVRAM == 0 || current.deviceType == "PHYSICAL_DEVICE_TYPE_CPU" {
+			return
+		}
+
+		if current.usageVRAM == 0 && current.budgetVRAM != 0 {
+			current.usageVRAM = current.totalVRAM - current.budgetVRAM
+		} else if current.usageVRAM != 0 && current.budgetVRAM == 0 {
+			current.budgetVRAM = current.totalVRAM - current.usageVRAM
+		} else if current.usageVRAM == 0 && current.budgetVRAM == 0 {
+			current.usageVRAM  = 0
+			current.budgetVRAM = current.totalVRAM
+		}
+
+		usagePercent := float64(current.usageVRAM) / float64(current.totalVRAM) * float64(100.0)
+
+		gpus = append(gpus, GPUMemoryInfo{
+			Index:        current.index,
+			Name:         current.name,
+			Vendor:       VendorVulkan,
+			TotalVRAM:    current.totalVRAM,
+			UsedVRAM:     current.usageVRAM,
+			FreeVRAM:     current.budgetVRAM,
+			UsagePercent: usagePercent,
+		})
+	}
+
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if index, ok := parseVulkanGPUHeader(line); ok {
+			flushHeap()
+			flushGPU()
+			current = &vulkanGPUTextInfo{index: index}
+			inMemoryProperties = false
+			inMemoryHeaps = false
+			continue
+		}
+
+		if current == nil {
+			continue
+		}
+
+		if strings.HasPrefix(line, "deviceType") {
+			current.deviceType = parseVulkanValue(line)
+			continue
+		}
+
+		if strings.HasPrefix(line, "deviceName") {
+			current.name = parseVulkanValue(line)
+			continue
+		}
+
+		if line == "VkPhysicalDeviceMemoryProperties:" {
+			inMemoryProperties = true
+			inMemoryHeaps = false
+			flushHeap()
+			continue
+		}
+
+		if !inMemoryProperties {
+			continue
+		}
+
+		if strings.HasPrefix(line, "memoryHeaps:") {
+			inMemoryHeaps = true
+			continue
+		}
+
+		if strings.HasPrefix(line, "memoryTypes:") {
+			flushHeap()
+			inMemoryProperties = false
+			inMemoryHeaps = false
+			continue
+		}
+
+		if !inMemoryHeaps {
+			continue
+		}
+
+		if strings.HasPrefix(line, "memoryHeaps[") {
+			flushHeap()
+			inHeap = true
+			continue
+		}
+
+		if !inHeap {
+			continue
+		}
+
+		if strings.HasPrefix(line, "size") {
+			if size, ok := parseVulkanUintValue(line); ok {
+				heapSize = size
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "budget") {
+			if budget, ok := parseVulkanUintValue(line); ok {
+				heapBudget = budget
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "usage") {
+			if usage, ok := parseVulkanUintValue(line); ok {
+				heapUsage = usage
+			}
+			continue
+		}
+
+		if strings.Contains(line, "MEMORY_HEAP_DEVICE_LOCAL_BIT") {
+			heapDeviceLocal = true
+		}
+	}
+
+	flushHeap()
+	flushGPU()
+
+	return gpus
+}
+
+func parseVulkanGPUHeader(line string) (int, bool) {
+	if !strings.HasPrefix(line, "GPU") || !strings.HasSuffix(line, ":") {
+		return 0, false
+	}
+
+	index, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(line, "GPU"), ":"))
+	if err != nil {
+		return 0, false
+	}
+
+	return index, true
+}
+
+func parseVulkanValue(line string) string {
+	_, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return ""
+	}
+
+	return strings.TrimSpace(value)
+}
+
+func parseVulkanUintValue(line string) (uint64, bool) {
+	value := parseVulkanValue(line)
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return 0, false
+	}
+
+	parsed, err := strconv.ParseUint(fields[0], 0, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	return parsed, true
+}
+
+// getAppleGPUMemory detects Apple Silicon GPUs using system_profiler (macOS only).
+// Apple Silicon uses unified memory, so GPU memory is reported as system RAM.
+func getAppleGPUMemory() []GPUMemoryInfo {
+	if _, err := exec.LookPath("system_profiler"); err != nil {
+		return nil
+	}
+
+	cmd := exec.Command("system_profiler", "SPDisplaysDataType", "-json")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		xlog.Debug("system_profiler failed", "error", err, "stderr", stderr.String())
+		return nil
+	}
+
 	var result struct {
-		VkPhysicalDevices []struct {
-			DeviceName                       string `json:"deviceName"`
-			DeviceType                       string `json:"deviceType"`
-			VkPhysicalDeviceMemoryProperties struct {
-				MemoryHeaps []struct {
-					Flags int    `json:"flags"`
-					Size  uint64 `json:"size"`
-				} `json:"memoryHeaps"`
-			} `json:"VkPhysicalDeviceMemoryProperties"`
-		} `json:"VkPhysicalDevices"`
+		SPDisplaysDataType []struct {
+			Name       string `json:"_name"`
+			Model      string `json:"sppci_model"`
+			Cores      string `json:"sppci_cores"`
+			DeviceType string `json:"sppci_device_type"`
+			Vendor     string `json:"spdisplays_vendor"`
+		} `json:"SPDisplaysDataType"`
 	}
 
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		xlog.Debug("failed to parse vulkaninfo output", "error", err)
+		xlog.Debug("failed to parse system_profiler output", "error", err)
 		return nil
 	}
 
 	var gpus []GPUMemoryInfo
-
-	for i, device := range result.VkPhysicalDevices {
-		// Skip non-discrete/integrated GPUs if possible
-		if device.DeviceType == "VK_PHYSICAL_DEVICE_TYPE_CPU" {
+	for i, display := range result.SPDisplaysDataType {
+		if display.DeviceType != "spdisplays_gpu" {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(display.Vendor), "apple") {
 			continue
 		}
 
-		// Sum up device-local memory heaps
-		var totalVRAM uint64
-		for _, heap := range device.VkPhysicalDeviceMemoryProperties.MemoryHeaps {
-			// Flag 1 = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
-			if heap.Flags&1 != 0 {
-				totalVRAM += heap.Size
-			}
+		name := display.Model
+		if name == "" {
+			name = display.Name
+		}
+		if name == "" {
+			name = "Apple GPU"
 		}
 
-		if totalVRAM == 0 {
+		// Apple Silicon uses unified memory — report system RAM
+		ramInfo, err := GetSystemRAMInfo()
+		if err != nil {
+			xlog.Debug("Apple GPU detected but failed to get system RAM", "error", err)
+			gpus = append(gpus, GPUMemoryInfo{
+				Index:  i,
+				Name:   name,
+				Vendor: VendorApple,
+			})
 			continue
 		}
 
+		usagePercent := 0.0
+		if ramInfo.Total > 0 {
+			usagePercent = float64(ramInfo.Used) / float64(ramInfo.Total) * 100
+		}
+
+		xlog.Debug("Apple Silicon GPU detected (unified memory)", "device", name, "total_ram", ramInfo.Total)
 		gpus = append(gpus, GPUMemoryInfo{
 			Index:        i,
-			Name:         device.DeviceName,
-			Vendor:       VendorVulkan,
-			TotalVRAM:    totalVRAM,
-			UsedVRAM:     0, // Vulkan doesn't provide real-time usage
-			FreeVRAM:     totalVRAM,
-			UsagePercent: 0,
+			Name:         name,
+			Vendor:       VendorApple,
+			TotalVRAM:    ramInfo.Total,
+			UsedVRAM:     ramInfo.Used,
+			FreeVRAM:     ramInfo.Free,
+			UsagePercent: usagePercent,
 		})
 	}
 

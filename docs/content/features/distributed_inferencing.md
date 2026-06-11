@@ -1,10 +1,15 @@
 +++
 disableToc = false
-title = "🆕🖧 Distributed Inference"
+title = "P2P / Federated Inference"
 weight = 15
 url = "/features/distribute/"
 +++
 
+![Federated vs worker mode: federated routes a whole request to one node; worker shards one model across nodes](/images/diagrams/federated-vs-worker.png)
+
+{{% notice tip %}}
+Looking for production-grade horizontal scaling with PostgreSQL and NATS? See [Distributed Mode]({{% relref "features/distributed-mode" %}}).
+{{% /notice %}}
 
 This functionality enables LocalAI to distribute inference requests across multiple worker nodes, improving efficiency and performance. Nodes are automatically discovered and connect via p2p by using a shared token which makes sure the communication is secure and private between the nodes of the network.
 

@@ -110,6 +110,41 @@ func UpdateSettingsEndpoint(app *application.Application) echo.HandlerFunc {
 			})
 		}
 
+		// Branding asset filenames are owned exclusively by
+		// /api/branding/asset/{kind} (upload/delete). The Settings page also
+		// round-trips them via GET /api/settings, but its local state is stale
+		// once an asset has been uploaded — clicking Save would otherwise
+		// clobber the uploaded basename with the empty string the UI loaded
+		// at page open. Replace whatever the body sent for these three fields
+		// with the values currently on disk so /api/settings can never
+		// regress them.
+		if existing, err := appConfig.ReadPersistedSettings(); err == nil {
+			settings.LogoFile = existing.LogoFile
+			settings.LogoHorizontalFile = existing.LogoHorizontalFile
+			settings.FaviconFile = existing.FaviconFile
+		}
+
+		// The UI reads ApiKeys from GET /api/settings, which already returns the
+		// merged env+runtime list. When the user clicks Save, the same merged
+		// list comes back in the POST body. Strip the env-supplied keys from
+		// the incoming list before we persist or re-merge, otherwise each save
+		// duplicates the env keys on top of the previous merge (#9071).
+		if settings.ApiKeys != nil {
+			envKeys := startupConfig.ApiKeys
+			envSet := make(map[string]struct{}, len(envKeys))
+			for _, k := range envKeys {
+				envSet[k] = struct{}{}
+			}
+			runtimeOnly := make([]string, 0, len(*settings.ApiKeys))
+			for _, k := range *settings.ApiKeys {
+				if _, fromEnv := envSet[k]; fromEnv {
+					continue
+				}
+				runtimeOnly = append(runtimeOnly, k)
+			}
+			settings.ApiKeys = &runtimeOnly
+		}
+
 		settingsFile := filepath.Join(appConfig.DynamicConfigsDir, "runtime_settings.json")
 		settingsJSON, err := json.MarshalIndent(settings, "", "  ")
 		if err != nil {
@@ -134,6 +169,12 @@ func UpdateSettingsEndpoint(app *application.Application) echo.HandlerFunc {
 			envKeys := startupConfig.ApiKeys
 			runtimeKeys := *settings.ApiKeys
 			appConfig.ApiKeys = append(envKeys, runtimeKeys...)
+		}
+
+		// Update backend logging dynamically
+		if settings.EnableBackendLogging != nil {
+			app.ModelLoader().SetBackendLoggingEnabled(*settings.EnableBackendLogging)
+			xlog.Info("Updated backend logging setting", "enableBackendLogging", *settings.EnableBackendLogging)
 		}
 
 		// Update watchdog dynamically for settings that don't require restart
@@ -208,6 +249,16 @@ func UpdateSettingsEndpoint(app *application.Application) echo.HandlerFunc {
 				return c.JSON(http.StatusInternalServerError, schema.SettingsResponse{
 					Success: false,
 					Error:   "Settings saved but failed to restart agent job service: " + err.Error(),
+				})
+			}
+		}
+
+		if settings.MITMListen != nil {
+			if err := app.RestartMITM(); err != nil {
+				xlog.Error("Failed to restart MITM proxy", "error", err)
+				return c.JSON(http.StatusInternalServerError, schema.SettingsResponse{
+					Success: false,
+					Error:   "Settings saved but failed to restart MITM proxy: " + err.Error(),
 				})
 			}
 		}

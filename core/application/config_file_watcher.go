@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"dario.cat/mergo"
@@ -198,7 +199,6 @@ func readRuntimeSettingsJson(startupAppConfig config.ApplicationConfig) fileHand
 		envWatchdogBusyTimeout := appConfig.WatchDogBusyTimeout == startupAppConfig.WatchDogBusyTimeout
 		envSingleBackend := appConfig.SingleBackend == startupAppConfig.SingleBackend
 		envMaxActiveBackends := appConfig.MaxActiveBackends == startupAppConfig.MaxActiveBackends
-		envParallelRequests := appConfig.ParallelBackendRequests == startupAppConfig.ParallelBackendRequests
 		envMemoryReclaimerEnabled := appConfig.MemoryReclaimerEnabled == startupAppConfig.MemoryReclaimerEnabled
 		envMemoryReclaimerThreshold := appConfig.MemoryReclaimerThreshold == startupAppConfig.MemoryReclaimerThreshold
 		envThreads := appConfig.Threads == startupAppConfig.Threads
@@ -206,11 +206,13 @@ func readRuntimeSettingsJson(startupAppConfig config.ApplicationConfig) fileHand
 		envF16 := appConfig.F16 == startupAppConfig.F16
 		envDebug := appConfig.Debug == startupAppConfig.Debug
 		envCORS := appConfig.CORS == startupAppConfig.CORS
-		envCSRF := appConfig.CSRF == startupAppConfig.CSRF
+		envCSRF := appConfig.DisableCSRF == startupAppConfig.DisableCSRF
 		envCORSAllowOrigins := appConfig.CORSAllowOrigins == startupAppConfig.CORSAllowOrigins
 		envP2PToken := appConfig.P2PToken == startupAppConfig.P2PToken
 		envP2PNetworkID := appConfig.P2PNetworkID == startupAppConfig.P2PNetworkID
 		envFederated := appConfig.Federated == startupAppConfig.Federated
+		envGalleries := slices.Equal(appConfig.Galleries, startupAppConfig.Galleries)
+		envBackendGalleries := slices.Equal(appConfig.BackendGalleries, startupAppConfig.BackendGalleries)
 		envAutoloadGalleries := appConfig.AutoloadGalleries == startupAppConfig.AutoloadGalleries
 		envAutoloadBackendGalleries := appConfig.AutoloadBackendGalleries == startupAppConfig.AutoloadBackendGalleries
 		envAgentJobRetentionDays := appConfig.AgentJobRetentionDays == startupAppConfig.AgentJobRetentionDays
@@ -268,9 +270,6 @@ func readRuntimeSettingsJson(startupAppConfig config.ApplicationConfig) fileHand
 					appConfig.MaxActiveBackends = 0
 				}
 			}
-			if settings.ParallelBackendRequests != nil && !envParallelRequests {
-				appConfig.ParallelBackendRequests = *settings.ParallelBackendRequests
-			}
 			if settings.MemoryReclaimerEnabled != nil && !envMemoryReclaimerEnabled {
 				appConfig.MemoryReclaimerEnabled = *settings.MemoryReclaimerEnabled
 				if appConfig.MemoryReclaimerEnabled {
@@ -310,7 +309,7 @@ func readRuntimeSettingsJson(startupAppConfig config.ApplicationConfig) fileHand
 				appConfig.CORS = *settings.CORS
 			}
 			if settings.CSRF != nil && !envCSRF {
-				appConfig.CSRF = *settings.CSRF
+				appConfig.DisableCSRF = *settings.CSRF
 			}
 			if settings.CORSAllowOrigins != nil && !envCORSAllowOrigins {
 				appConfig.CORSAllowOrigins = *settings.CORSAllowOrigins
@@ -324,10 +323,10 @@ func readRuntimeSettingsJson(startupAppConfig config.ApplicationConfig) fileHand
 			if settings.Federated != nil && !envFederated {
 				appConfig.Federated = *settings.Federated
 			}
-			if settings.Galleries != nil {
+			if settings.Galleries != nil && !envGalleries {
 				appConfig.Galleries = *settings.Galleries
 			}
-			if settings.BackendGalleries != nil {
+			if settings.BackendGalleries != nil && !envBackendGalleries {
 				appConfig.BackendGalleries = *settings.BackendGalleries
 			}
 			if settings.AutoloadGalleries != nil && !envAutoloadGalleries {
@@ -335,6 +334,12 @@ func readRuntimeSettingsJson(startupAppConfig config.ApplicationConfig) fileHand
 			}
 			if settings.AutoloadBackendGalleries != nil && !envAutoloadBackendGalleries {
 				appConfig.AutoloadBackendGalleries = *settings.AutoloadBackendGalleries
+			}
+			if settings.AutoUpgradeBackends != nil {
+				appConfig.AutoUpgradeBackends = *settings.AutoUpgradeBackends
+			}
+			if settings.PreferDevelopmentBackends != nil {
+				appConfig.PreferDevelopmentBackends = *settings.PreferDevelopmentBackends
 			}
 			if settings.ApiKeys != nil {
 				// API keys from env vars (startup) should be kept, runtime settings keys replace all runtime keys

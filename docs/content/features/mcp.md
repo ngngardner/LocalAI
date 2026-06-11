@@ -1,11 +1,13 @@
 +++
-title = "🔗 Model Context Protocol (MCP)"
+title = "Model Context Protocol (MCP)"
 weight = 20
 toc = true
 description = "Agentic capabilities with Model Context Protocol integration"
 tags = ["MCP", "Agents", "Tools", "Advanced"]
 categories = ["Features"]
 +++
+
+![Server-side vs client-side MCP: the model's tool loop runs on the server or in the browser](/images/diagrams/mcp-server-vs-client.png)
 
 
 LocalAI now supports the **Model Context Protocol (MCP)**, enabling powerful agentic capabilities by connecting AI models to external tools and services. This feature allows your LocalAI models to interact with various MCP servers, providing access to real-time data, APIs, and specialized tools.

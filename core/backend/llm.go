@@ -13,11 +13,13 @@ import (
 	"github.com/mudler/xlog"
 
 	"github.com/mudler/LocalAI/core/config"
-	"github.com/mudler/LocalAI/core/trace"
 	"github.com/mudler/LocalAI/core/schema"
-	"github.com/mudler/LocalAI/core/services"
+	"github.com/mudler/LocalAI/core/services/galleryop"
+	"github.com/mudler/LocalAI/core/templates"
+	"github.com/mudler/LocalAI/core/trace"
 
 	"github.com/mudler/LocalAI/core/gallery"
+	"github.com/mudler/LocalAI/pkg/distributedhdr"
 	"github.com/mudler/LocalAI/pkg/grpc/proto"
 	model "github.com/mudler/LocalAI/pkg/model"
 	"github.com/mudler/LocalAI/pkg/utils"
@@ -27,7 +29,7 @@ type LLMResponse struct {
 	Response    string // should this be []byte?
 	Usage       TokenUsage
 	AudioOutput string
-	Logprobs    *schema.Logprobs // Logprobs from the backend response
+	Logprobs    *schema.Logprobs   // Logprobs from the backend response
 	ChatDeltas  []*proto.ChatDelta // Pre-parsed tool calls/content from C++ autoparser
 }
 
@@ -36,21 +38,56 @@ type TokenUsage struct {
 	Completion             int
 	TimingPromptProcessing float64
 	TimingTokenGeneration  float64
+	ChatDeltas             []*proto.ChatDelta // per-chunk deltas from C++ autoparser (only set during streaming)
 }
+
+func needsThinkingProbe(c *config.ModelConfig) bool {
+	return c.TemplateConfig.UseTokenizerTemplate &&
+		(c.ReasoningConfig.DisableReasoning == nil ||
+			c.ReasoningConfig.DisableReasoningTagPrefill == nil)
+}
+
+// HasChatDeltaContent returns true if any chat delta carries content or reasoning text.
+// Used to decide whether to prefer C++ autoparser deltas over Go-side tag extraction.
+func (t TokenUsage) HasChatDeltaContent() bool {
+	for _, d := range t.ChatDeltas {
+		if d.Content != "" || d.ReasoningContent != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// ChatDeltaReasoningAndContent extracts accumulated reasoning and content from chat deltas.
+func (t TokenUsage) ChatDeltaReasoningAndContent() (reasoning, content string) {
+	for _, d := range t.ChatDeltas {
+		content += d.Content
+		reasoning += d.ReasoningContent
+	}
+	return reasoning, content
+}
+
+// ModelInferenceFunc is a test-friendly indirection to call model inference logic.
+// Tests can override this variable to provide a stub implementation.
+var ModelInferenceFunc = ModelInference
 
 func ModelInference(ctx context.Context, s string, messages schema.Messages, images, videos, audios []string, loader *model.ModelLoader, c *config.ModelConfig, cl *config.ModelConfigLoader, o *config.ApplicationConfig, tokenCallback func(string, TokenUsage) bool, tools string, toolChoice string, logprobs *int, topLogprobs *int, logitBias map[string]float64, metadata map[string]string) (func() (LLMResponse, error), error) {
 	modelFile := c.Model
 
 	// Check if the modelFile exists, if it doesn't try to load it from the gallery
 	if o.AutoloadGalleries { // experimental
-		modelNames, err := services.ListModels(cl, loader, nil, services.SKIP_ALWAYS)
+		modelNames, err := galleryop.ListModels(cl, loader, nil, galleryop.SKIP_ALWAYS)
 		if err != nil {
 			return nil, err
 		}
-		if !slices.Contains(modelNames, c.Name) {
+		modelName := c.Name
+		if modelName == "" {
+			modelName = c.Model
+		}
+		if !slices.Contains(modelNames, modelName) {
 			utils.ResetDownloadTimers()
 			// if we failed to load the model, we try to download it
-			err := gallery.InstallModelFromGallery(ctx, o.Galleries, o.BackendGalleries, o.SystemState, loader, c.Name, gallery.GalleryModel{}, utils.DisplayDownloadFunction, o.EnforcePredownloadScans, o.AutoloadBackendGalleries)
+			err := gallery.InstallModelFromGallery(ctx, o.Galleries, o.BackendGalleries, o.SystemState, loader, modelName, gallery.GalleryModel{}, utils.DisplayDownloadFunction, o.EnforcePredownloadScans, o.AutoloadBackendGalleries, o.RequireBackendIntegrity)
 			if err != nil {
 				xlog.Error("failed to install model from gallery", "error", err, "model", modelFile)
 				//return nil, err
@@ -58,21 +95,46 @@ func ModelInference(ctx context.Context, s string, messages schema.Messages, ima
 		}
 	}
 
-	opts := ModelOptions(*c, o)
+	// Make the rendered prompt's prefix chain available to the distributed router
+	// for prefix-cache-aware node selection. No-op in single-process mode. The
+	// model id MUST match the id ModelOptions feeds to model.WithModelID, so both
+	// use the shared config.ModelConfig.ModelID() helper (Name with a fallback to
+	// Model) or the chain salt and the tracking key would diverge.
+	//
+	// s is empty for UseTokenizerTemplate models (the backend tokenizes the
+	// structured messages itself), so fall back to a prefix-stable serialization
+	// of the messages - otherwise prefix routing would silently degrade to
+	// round-robin for the bulk of modern chat models.
+	chainSource := s
+	if chainSource == "" {
+		chainSource = messagesPrefixSource(messages)
+	}
+	ctx = distributedhdr.MaybeWithPrefixChain(ctx, c.ModelID(), chainSource)
+
+	opts := ModelOptions(*c, o, model.WithContext(ctx))
 	inferenceModel, err := loader.Load(opts...)
 	if err != nil {
+		recordModelLoadFailure(o, c.Name, c.Backend, err, map[string]any{"model_file": modelFile})
 		return nil, err
 	}
 
-	// Detect thinking support after model load (only if not already detected)
-	// This needs to happen after LoadModel succeeds so the backend can render templates
-	if (c.ReasoningConfig.DisableReasoning == nil && c.ReasoningConfig.DisableReasoningTagPrefill == nil) && c.TemplateConfig.UseTokenizerTemplate {
+	// Probe the backend for model-scoped metadata after LoadModel succeeds.
+	// Two signals are captured: thinking-mode detection (only meaningful when the
+	// tokenizer template path is active) and the multimodal media marker (needed
+	// by custom chat templates so markers line up with what mtmd expects).
+	// We probe whenever any of those slots is still empty.
+	shouldProbeThinking := needsThinkingProbe(c)
+	needsMarkerProbe := c.MediaMarker == ""
+	if shouldProbeThinking || needsMarkerProbe {
 		modelOpts := grpcModelOpts(*c, o.SystemState.Model.ModelsPath)
 		config.DetectThinkingSupportFromBackend(ctx, c, inferenceModel, modelOpts)
 		// Update the config in the loader so it persists for future requests
 		cl.UpdateModelConfig(c.Name, func(cfg *config.ModelConfig) {
 			cfg.ReasoningConfig.DisableReasoning = c.ReasoningConfig.DisableReasoning
 			cfg.ReasoningConfig.DisableReasoningTagPrefill = c.ReasoningConfig.DisableReasoningTagPrefill
+			if c.MediaMarker != "" {
+				cfg.MediaMarker = c.MediaMarker
+			}
 		})
 	}
 
@@ -84,13 +146,24 @@ func ModelInference(ctx context.Context, s string, messages schema.Messages, ima
 	}
 
 	// in GRPC, the backend is supposed to answer to 1 single token if stream is not supported
+	var capturedPredictOpts *proto.PredictOptions
 	fn := func() (LLMResponse, error) {
 		opts := gRPCPredictOpts(*c, loader.ModelPath)
 		// Merge request-level metadata (overrides config defaults)
 		for k, v := range metadata {
 			opts.Metadata[k] = v
 		}
-		opts.Prompt = s
+		// The prompt was rendered with the sentinel "<__media__>" marker because
+		// middleware templating runs before the backend is loaded and probed.
+		// Once we know the backend's actual media marker, substitute so marker
+		// count matches the bitmap count passed through opts.Images/Videos/Audios.
+		// No-op when MediaMarker is unset, matches the sentinel, or the prompt has
+		// no media placeholders.
+		prompt := s
+		if c.MediaMarker != "" && c.MediaMarker != templates.DefaultMultiMediaMarker {
+			prompt = strings.ReplaceAll(prompt, templates.DefaultMultiMediaMarker, c.MediaMarker)
+		}
+		opts.Prompt = prompt
 		opts.Messages = protoMessages
 		opts.UseTokenizerTemplate = c.TemplateConfig.UseTokenizerTemplate
 		opts.Images = images
@@ -111,6 +184,7 @@ func ModelInference(ctx context.Context, s string, messages schema.Messages, ima
 				opts.LogitBias = string(logitBiasJSON)
 			}
 		}
+		capturedPredictOpts = opts
 
 		tokenUsage := TokenUsage{}
 
@@ -160,6 +234,9 @@ func ModelInference(ctx context.Context, s string, messages schema.Messages, ima
 					allChatDeltas = append(allChatDeltas, reply.ChatDeltas...)
 				}
 
+				// Attach per-chunk chat deltas to tokenUsage so the callback can use them
+				tokenUsage.ChatDeltas = reply.ChatDeltas
+
 				// Parse logprobs from reply if present (collect from last chunk that has them)
 				if len(reply.Logprobs) > 0 {
 					var parsedLogprobs schema.Logprobs
@@ -189,6 +266,9 @@ func ModelInference(ctx context.Context, s string, messages schema.Messages, ima
 				if len(msg) == 0 {
 					tokenCallback("", tokenUsage)
 				}
+
+				// Clear per-chunk deltas so they don't leak to the next chunk
+				tokenUsage.ChatDeltas = nil
 			})
 			if len(allChatDeltas) > 0 {
 				xlog.Debug("[ChatDeltas] streaming completed, accumulated deltas from C++ autoparser", "total_deltas", len(allChatDeltas))
@@ -242,31 +322,25 @@ func ModelInference(ctx context.Context, s string, messages schema.Messages, ima
 	}
 
 	if o.EnableTracing {
-		trace.InitBackendTracingIfEnabled(o.TracingMaxItems)
+		trace.InitBackendTracingIfEnabled(o.TracingMaxItems, o.TracingMaxBodyBytes)
 
 		traceData := map[string]any{
-			"prompt":                 s,
-			"use_tokenizer_template": c.TemplateConfig.UseTokenizerTemplate,
-			"chat_template":          c.TemplateConfig.Chat,
-			"function_template":      c.TemplateConfig.Functions,
-			"grammar":               c.Grammar,
-			"stop_words":            c.StopWords,
-			"streaming":             tokenCallback != nil,
-			"images_count":          len(images),
-			"videos_count":          len(videos),
-			"audios_count":          len(audios),
+			"chat_template":     c.TemplateConfig.Chat,
+			"function_template": c.TemplateConfig.Functions,
+			"streaming":         tokenCallback != nil,
+			"images_count":      len(images),
+			"videos_count":      len(videos),
+			"audios_count":      len(audios),
 		}
 
+		// Cap the captured fields up front: agent-pool LLM calls embed the
+		// full augmented chat history in messages and the full reply in
+		// response, so without a per-field cap a single trace can dwarf the
+		// rest of the buffer. The cap matches the API-trace body cap.
 		if len(messages) > 0 {
 			if msgJSON, err := json.Marshal(messages); err == nil {
-				traceData["messages"] = string(msgJSON)
+				traceData["messages"] = trace.TruncateToBytes(string(msgJSON), o.TracingMaxBodyBytes)
 			}
-		}
-		if tools != "" {
-			traceData["tools"] = tools
-		}
-		if toolChoice != "" {
-			traceData["tool_choice"] = toolChoice
 		}
 		if reasoningJSON, err := json.Marshal(c.ReasoningConfig); err == nil {
 			traceData["reasoning_config"] = string(reasoningJSON)
@@ -277,15 +351,6 @@ func ModelInference(ctx context.Context, s string, messages schema.Messages, ima
 			"mixed_mode":        c.FunctionsConfig.GrammarConfig.MixedMode,
 			"xml_format_preset": c.FunctionsConfig.XMLFormatPreset,
 		}
-		if c.Temperature != nil {
-			traceData["temperature"] = *c.Temperature
-		}
-		if c.TopP != nil {
-			traceData["top_p"] = *c.TopP
-		}
-		if c.Maxtokens != nil {
-			traceData["max_tokens"] = *c.Maxtokens
-		}
 
 		startTime := time.Now()
 		originalFn := fn
@@ -293,10 +358,46 @@ func ModelInference(ctx context.Context, s string, messages schema.Messages, ima
 			resp, err := originalFn()
 			duration := time.Since(startTime)
 
-			traceData["response"] = resp.Response
+			traceData["response"] = trace.TruncateToBytes(resp.Response, o.TracingMaxBodyBytes)
 			traceData["token_usage"] = map[string]any{
 				"prompt":     resp.Usage.Prompt,
 				"completion": resp.Usage.Completion,
+			}
+
+			if len(resp.ChatDeltas) > 0 {
+				chatDeltasInfo := map[string]any{
+					"total_deltas": len(resp.ChatDeltas),
+				}
+				var contentParts, reasoningParts []string
+				toolCallCount := 0
+				for _, d := range resp.ChatDeltas {
+					if d.Content != "" {
+						contentParts = append(contentParts, d.Content)
+					}
+					if d.ReasoningContent != "" {
+						reasoningParts = append(reasoningParts, d.ReasoningContent)
+					}
+					toolCallCount += len(d.ToolCalls)
+				}
+				if len(contentParts) > 0 {
+					chatDeltasInfo["content"] = trace.TruncateToBytes(strings.Join(contentParts, ""), o.TracingMaxBodyBytes)
+				}
+				if len(reasoningParts) > 0 {
+					chatDeltasInfo["reasoning_content"] = trace.TruncateToBytes(strings.Join(reasoningParts, ""), o.TracingMaxBodyBytes)
+				}
+				if toolCallCount > 0 {
+					chatDeltasInfo["tool_call_count"] = toolCallCount
+				}
+				traceData["chat_deltas"] = chatDeltasInfo
+			}
+
+			if capturedPredictOpts != nil {
+				if optsJSON, err := json.Marshal(capturedPredictOpts); err == nil {
+					var optsMap map[string]any
+					if err := json.Unmarshal(optsJSON, &optsMap); err == nil {
+						traceData["predict_options"] = optsMap
+					}
+				}
 			}
 
 			errStr := ""

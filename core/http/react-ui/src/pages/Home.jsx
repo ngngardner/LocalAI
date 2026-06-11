@@ -1,29 +1,29 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
+import { apiUrl } from '../utils/basePath'
+import { useAuth } from '../context/AuthContext'
+import { useBranding } from '../contexts/BrandingContext'
 import ModelSelector from '../components/ModelSelector'
-import ClientMCPDropdown from '../components/ClientMCPDropdown'
+import { CAP_CHAT } from '../utils/capabilities'
+import UnifiedMCPDropdown from '../components/UnifiedMCPDropdown'
+import ConfirmDialog from '../components/ConfirmDialog'
 import { useResources } from '../hooks/useResources'
-import { fileToBase64, backendControlApi, systemApi, modelsApi, mcpApi } from '../utils/api'
+import { fileToBase64, backendControlApi, systemApi, modelsApi, mcpApi, nodesApi } from '../utils/api'
 import { API_CONFIG } from '../utils/config'
 
-const placeholderMessages = [
-  'What is the meaning of life?',
-  'Write a poem about AI',
-  'Explain quantum computing simply',
-  'Help me debug my code',
-  'Tell me a creative story',
-  'How do neural networks work?',
-  'Write a haiku about programming',
-  'Explain blockchain in simple terms',
-  'What are the best practices for REST APIs?',
-  'Help me write a cover letter',
-  'What is the Fibonacci sequence?',
-  'Explain the theory of relativity',
-]
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return null
+  const gb = bytes / (1024 * 1024 * 1024)
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`
+}
 
 export default function Home() {
   const navigate = useNavigate()
   const { addToast } = useOutletContext()
+  const { t } = useTranslation('home')
+  const { isAdmin } = useAuth()
+  const branding = useBranding()
   const { resources } = useResources()
   const [configuredModels, setConfiguredModels] = useState(null)
   const configuredModelsRef = useRef(configuredModels)
@@ -36,18 +36,71 @@ export default function Home() {
   const [textFiles, setTextFiles] = useState([])
   const [mcpMode, setMcpMode] = useState(false)
   const [mcpAvailable, setMcpAvailable] = useState(false)
-  const [mcpServersOpen, setMcpServersOpen] = useState(false)
   const [mcpServerList, setMcpServerList] = useState([])
   const [mcpServersLoading, setMcpServersLoading] = useState(false)
   const [mcpServerCache, setMcpServerCache] = useState({})
   const [mcpSelectedServers, setMcpSelectedServers] = useState([])
   const [clientMCPSelectedIds, setClientMCPSelectedIds] = useState([])
-  const mcpDropdownRef = useRef(null)
-  const [placeholderIdx, setPlaceholderIdx] = useState(0)
-  const [placeholderText, setPlaceholderText] = useState('')
+  const [assistantAvailable, setAssistantAvailable] = useState(false)
+  // Progressive disclosure: the big "Manage by chatting" CTA card is a
+  // first-run affordance. Once the admin has clicked it, we collapse to
+  // a small entry in the quick-links row so the home page doesn't keep
+  // shouting at them about a feature they already know.
+  const [assistantUsed, setAssistantUsed] = useState(() => {
+    try { return localStorage.getItem('localai_assistant_used') === '1' } catch { return false }
+  })
+  const [confirmDialog, setConfirmDialog] = useState(null)
+  const [distributedMode, setDistributedMode] = useState(false)
+  const [clusterData, setClusterData] = useState(null)
   const imageInputRef = useRef(null)
   const audioInputRef = useRef(null)
   const fileInputRef = useRef(null)
+
+  // Detect distributed mode + assistant feature availability in one fetch.
+  useEffect(() => {
+    fetch(apiUrl('/api/features'))
+      .then(r => r.json())
+      .then(data => {
+        setDistributedMode(!!data.distributed)
+        setAssistantAvailable(!!data.localai_assistant)
+      })
+      .catch(() => {})
+  }, [])
+
+  // Poll cluster node data in distributed mode
+  useEffect(() => {
+    if (!distributedMode) return
+    const fetchCluster = async () => {
+      try {
+        const data = await nodesApi.list()
+        const nodes = Array.isArray(data) ? data : []
+        const backendNodes = nodes.filter(n => !n.node_type || n.node_type === 'backend')
+        const totalVRAM = backendNodes.reduce((sum, n) => sum + (n.total_vram || 0), 0)
+        const usedVRAM = backendNodes.reduce((sum, n) => {
+          if (n.total_vram && n.available_vram != null) return sum + (n.total_vram - n.available_vram)
+          return sum
+        }, 0)
+        const totalRAM = backendNodes.reduce((sum, n) => sum + (n.total_ram || 0), 0)
+        const usedRAM = backendNodes.reduce((sum, n) => {
+          if (n.total_ram && n.available_ram != null) return sum + (n.total_ram - n.available_ram)
+          return sum
+        }, 0)
+        const isGPU = totalVRAM > 0
+        const healthyCount = backendNodes.filter(n => n.status === 'healthy').length
+        const totalCount = backendNodes.length
+        setClusterData({
+          totalMem: isGPU ? totalVRAM : totalRAM,
+          usedMem: isGPU ? usedVRAM : usedRAM,
+          isGPU,
+          healthyCount,
+          totalCount,
+        })
+      } catch { setClusterData(null) }
+    }
+    fetchCluster()
+    const interval = setInterval(fetchCluster, 5000)
+    return () => clearInterval(interval)
+  }, [distributedMode])
 
   // Fetch configured models (to know if any exist) and loaded models (currently running)
   const fetchSystemInfo = useCallback(async () => {
@@ -104,30 +157,15 @@ export default function Home() {
 
   const allFiles = [...imageFiles, ...audioFiles, ...textFiles]
 
-  // Animated typewriter placeholder
-  useEffect(() => {
-    const target = placeholderMessages[placeholderIdx]
-    let charIdx = 0
-    setPlaceholderText('')
-    const interval = setInterval(() => {
-      if (charIdx <= target.length) {
-        setPlaceholderText(target.slice(0, charIdx))
-        charIdx++
-      } else {
-        clearInterval(interval)
-        setTimeout(() => {
-          setPlaceholderIdx(prev => (prev + 1) % placeholderMessages.length)
-        }, 2000)
-      }
-    }, 50)
-    return () => clearInterval(interval)
-  }, [placeholderIdx])
-
   const addFiles = useCallback(async (fileList, setter) => {
     const newFiles = []
     for (const file of fileList) {
       const base64 = await fileToBase64(file)
-      newFiles.push({ name: file.name, type: file.type, base64 })
+      const entry = { name: file.name, type: file.type, base64 }
+      if (!file.type.startsWith('image/') && !file.type.startsWith('audio/')) {
+        entry.textContent = await file.text().catch(() => '')
+      }
+      newFiles.push(entry)
     }
     setter(prev => [...prev, ...newFiles])
   }, [])
@@ -138,17 +176,6 @@ export default function Home() {
     else if (file.type?.startsWith('audio/')) setAudioFiles(removeFn)
     else setTextFiles(removeFn)
   }, [])
-
-  useEffect(() => {
-    if (!mcpServersOpen) return
-    const handleClick = (e) => {
-      if (mcpDropdownRef.current && !mcpDropdownRef.current.contains(e.target)) {
-        setMcpServersOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [mcpServersOpen])
 
   const fetchMcpServers = useCallback(async () => {
     if (!selectedModel) return
@@ -176,10 +203,10 @@ export default function Home() {
   }, [])
 
   const doSubmit = useCallback(() => {
-    const text = message.trim() || placeholderText
+    const text = message.trim()
     if (!text && allFiles.length === 0) return
     if (!selectedModel) {
-      addToast('Please select a model first', 'warning')
+      addToast(t('input.selectModelToast'), 'warning')
       return
     }
 
@@ -193,8 +220,24 @@ export default function Home() {
       newChat: true,
     }
     localStorage.setItem('localai_index_chat_data', JSON.stringify(chatData))
-    navigate(`/chat/${encodeURIComponent(selectedModel)}`)
-  }, [message, placeholderText, allFiles, selectedModel, mcpMode, mcpSelectedServers, clientMCPSelectedIds, addToast, navigate])
+    navigate(`/app/chat/${encodeURIComponent(selectedModel)}`)
+  }, [message, allFiles, selectedModel, mcpMode, mcpSelectedServers, clientMCPSelectedIds, addToast, navigate])
+
+  // Quick-launch: open a fresh chat already in assistant mode without
+  // requiring an initial message or model selection. Useful when an admin
+  // wants to start the assistant from a cold home page.
+  const openAssistantChat = useCallback(() => {
+    const chatData = {
+      model: selectedModel || '',
+      mcpMode: false,
+      localaiAssistant: true,
+      newChat: true,
+    }
+    localStorage.setItem('localai_index_chat_data', JSON.stringify(chatData))
+    try { localStorage.setItem('localai_assistant_used', '1') } catch { /* ignore */ }
+    setAssistantUsed(true)
+    navigate('/app/chat')
+  }, [navigate, selectedModel])
 
   const handleSubmit = (e) => {
     if (e) e.preventDefault()
@@ -202,26 +245,41 @@ export default function Home() {
   }
 
   const handleStopModel = async (modelName) => {
-    if (!confirm(`Stop model ${modelName}?`)) return
-    try {
-      await backendControlApi.shutdown({ model: modelName })
-      addToast(`Stopped ${modelName}`, 'success')
-      // Refresh loaded models list after a short delay
-      setTimeout(fetchSystemInfo, 500)
-    } catch (err) {
-      addToast(`Failed to stop: ${err.message}`, 'error')
-    }
+    setConfirmDialog({
+      title: t('stopDialog.title'),
+      message: t('stopDialog.message', { model: modelName }),
+      confirmLabel: t('stopDialog.confirm', { model: modelName }),
+      danger: true,
+      onConfirm: async () => {
+        setConfirmDialog(null)
+        try {
+          await backendControlApi.shutdown({ model: modelName })
+          addToast(t('stopDialog.stoppedToast', { model: modelName }), 'success')
+          setTimeout(fetchSystemInfo, 500)
+        } catch (err) {
+          addToast(t('stopDialog.stopFailed', { message: err.message }), 'error')
+        }
+      },
+    })
   }
 
   const handleStopAll = async () => {
-    if (!confirm('Stop all loaded models?')) return
-    try {
-      await Promise.all(loadedModels.map(m => backendControlApi.shutdown({ model: m.id })))
-      addToast('All models stopped', 'success')
-      setTimeout(fetchSystemInfo, 1000)
-    } catch (err) {
-      addToast(`Failed to stop: ${err.message}`, 'error')
-    }
+    setConfirmDialog({
+      title: t('stopDialog.stopAllTitle'),
+      message: t('stopDialog.stopAllMessage', { count: loadedModels.length }),
+      confirmLabel: t('stopDialog.stopAllConfirm'),
+      danger: true,
+      onConfirm: async () => {
+        setConfirmDialog(null)
+        try {
+          await Promise.all(loadedModels.map(m => backendControlApi.shutdown({ model: m.id })))
+          addToast(t('stopDialog.allStoppedToast'), 'success')
+          setTimeout(fetchSystemInfo, 1000)
+        } catch (err) {
+          addToast(t('stopDialog.stopFailed', { message: err.message }), 'error')
+        }
+      },
+    })
   }
 
   const modelsLoading = configuredModels === null
@@ -233,84 +291,102 @@ export default function Home() {
   const usagePct = resources?.aggregate?.usage_percent ?? resources?.ram?.usage_percent ?? 0
   const pctColor = usagePct > 90 ? 'var(--color-error)' : usagePct > 70 ? 'var(--color-warning)' : 'var(--color-success)'
 
+  // Cluster resource display (distributed mode)
+  const clusterUsagePct = clusterData?.totalMem > 0 ? ((clusterData.usedMem / clusterData.totalMem) * 100) : 0
+  const clusterPctColor = clusterUsagePct > 90 ? 'var(--color-error)' : clusterUsagePct > 70 ? 'var(--color-warning)' : 'var(--color-success)'
+
   return (
     <div className="home-page">
       {hasModels ? (
         <>
           {/* Hero with logo */}
           <div className="home-hero">
-            <img src="/static/logo.png" alt="LocalAI" className="home-logo" />
-            <h1 className="home-heading">How can I help you today?</h1>
-            <p className="home-subheading">Ask me anything, and I'll do my best to assist you.</p>
+            <img src={apiUrl(branding.logoUrl)} alt={branding.instanceName} className="home-logo" />
           </div>
+
+          {/* Resource monitor - prominent placement */}
+          {distributedMode && clusterData && clusterData.totalMem > 0 ? (
+            <div className="home-resource-bar">
+              <div className="home-resource-bar-header">
+                <i className={`fas ${clusterData.isGPU ? 'fa-microchip' : 'fa-memory'}`} />
+                <span className="home-resource-label">{clusterData.isGPU ? t('cluster.vram') : t('cluster.ram')}</span>
+                <span className="home-resource-pct" style={{ color: clusterPctColor }}>
+                  {formatBytes(clusterData.usedMem)} / {formatBytes(clusterData.totalMem)}
+                </span>
+              </div>
+              <div className="home-resource-track">
+                <div
+                  className="home-resource-fill"
+                  style={{ width: `${clusterUsagePct}%`, background: clusterPctColor }}
+                />
+              </div>
+              <div className="home-cluster-status">
+                <span className="home-cluster-dot" style={clusterData.healthyCount === 0 ? { background: 'var(--color-error)' } : undefined} />
+                <span>{t('cluster.nodesOnline', { healthy: clusterData.healthyCount, total: clusterData.totalCount })}</span>
+              </div>
+            </div>
+          ) : !distributedMode && resources ? (
+            <div className="home-resource-bar">
+              <div className="home-resource-bar-header">
+                <i className={`fas ${resType === 'gpu' ? 'fa-microchip' : 'fa-memory'}`} />
+                <span className="home-resource-label">{resType === 'gpu' ? t('resourceGpu') : t('resourceRam')}</span>
+                <span className="home-resource-pct" style={{ color: pctColor }}>
+                  {usagePct.toFixed(0)}%
+                </span>
+              </div>
+              <div className="home-resource-track">
+                <div
+                  className="home-resource-fill"
+                  style={{ width: `${usagePct}%`, background: pctColor }}
+                />
+              </div>
+            </div>
+          ) : null}
+
+          {/* LocalAI Assistant — prominent CTA on first run. Once the
+              admin has used it, the big card collapses to a small entry in
+              the quick-links row below. */}
+          {isAdmin && assistantAvailable && !assistantUsed && (
+            <button
+              type="button"
+              onClick={openAssistantChat}
+              className="home-assistant-card"
+            >
+              <span className="home-assistant-icon"><i className="fas fa-user-shield" /></span>
+              <span className="home-assistant-text">
+                <span className="home-assistant-title">{t('assistant.title')}</span>
+                <span className="home-assistant-desc">{t('assistant.description')}</span>
+              </span>
+              <span className="home-assistant-cta">
+                {t('assistant.open')} <i className="fas fa-arrow-right" />
+              </span>
+            </button>
+          )}
 
           {/* Chat input form */}
           <div className="home-chat-card">
             <form onSubmit={handleSubmit}>
               {/* Model selector + MCP toggle */}
               <div className="home-model-row">
-                <ModelSelector value={selectedModel} onChange={setSelectedModel} capability="FLAG_CHAT" />
-                {mcpAvailable && (
-                  <div className="chat-mcp-dropdown" ref={mcpDropdownRef}>
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${mcpSelectedServers.length > 0 ? 'btn-primary' : 'btn-secondary'}`}
-                      title="Select MCP servers"
-                      onClick={() => { setMcpServersOpen(!mcpServersOpen); if (!mcpServersOpen) fetchMcpServers() }}
-                    >
-                      <i className="fas fa-plug" /> MCP
-                      {mcpSelectedServers.length > 0 && (
-                        <span className="chat-mcp-badge">{mcpSelectedServers.length}</span>
-                      )}
-                    </button>
-                    {mcpServersOpen && (
-                      <div className="chat-mcp-dropdown-menu">
-                        {mcpServersLoading ? (
-                          <div className="chat-mcp-dropdown-loading"><i className="fas fa-spinner fa-spin" /> Loading servers...</div>
-                        ) : mcpServerList.length === 0 ? (
-                          <div className="chat-mcp-dropdown-empty">No MCP servers configured</div>
-                        ) : (
-                          <>
-                            <div className="chat-mcp-dropdown-header">
-                              <span>MCP Servers</span>
-                              <button
-                                type="button"
-                                className="chat-mcp-select-all"
-                                onClick={() => {
-                                  const allNames = mcpServerList.map(s => s.name)
-                                  const allSelected = allNames.every(n => mcpSelectedServers.includes(n))
-                                  setMcpSelectedServers(allSelected ? [] : allNames)
-                                }}
-                              >
-                                {mcpServerList.every(s => mcpSelectedServers.includes(s.name)) ? 'Deselect all' : 'Select all'}
-                              </button>
-                            </div>
-                            {mcpServerList.map(server => (
-                              <label key={server.name} className="chat-mcp-server-item">
-                                <input
-                                  type="checkbox"
-                                  checked={mcpSelectedServers.includes(server.name)}
-                                  onChange={() => toggleMcpServer(server.name)}
-                                />
-                                <div className="chat-mcp-server-info">
-                                  <span className="chat-mcp-server-name">{server.name}</span>
-                                  <span className="chat-mcp-server-tools">{server.tools?.length || 0} tools</span>
-                                </div>
-                              </label>
-                            ))}
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-                <ClientMCPDropdown
-                  activeServerIds={clientMCPSelectedIds}
-                  onToggleServer={(id) => setClientMCPSelectedIds(prev =>
+                <ModelSelector value={selectedModel} onChange={setSelectedModel} capability={CAP_CHAT} />
+                <UnifiedMCPDropdown
+                  serverMCPAvailable={mcpAvailable}
+                  mcpServerList={mcpServerList}
+                  mcpServersLoading={mcpServersLoading}
+                  selectedServers={mcpSelectedServers}
+                  onToggleServer={toggleMcpServer}
+                  onSelectAllServers={() => {
+                    const allNames = mcpServerList.map(s => s.name)
+                    const allSelected = allNames.every(n => mcpSelectedServers.includes(n))
+                    setMcpSelectedServers(allSelected ? [] : allNames)
+                  }}
+                  onFetchServers={fetchMcpServers}
+                  clientMCPActiveIds={clientMCPSelectedIds}
+                  onClientToggle={(id) => setClientMCPSelectedIds(prev =>
                     prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
                   )}
-                  onServerAdded={(server) => setClientMCPSelectedIds(prev => [...prev, server.id])}
-                  onServerRemoved={(id) => setClientMCPSelectedIds(prev => prev.filter(s => s !== id))}
+                  onClientAdded={(server) => setClientMCPSelectedIds(prev => [...prev, server.id])}
+                  onClientRemoved={(id) => setClientMCPSelectedIds(prev => prev.filter(s => s !== id))}
                 />
               </div>
 
@@ -329,13 +405,13 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Textarea with attach buttons */}
-              <div className="home-input-area">
+              {/* Input container with inline send */}
+              <div className="home-input-container">
                 <textarea
                   className="home-textarea"
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
-                  placeholder={placeholderText}
+                  placeholder={t('input.placeholder')}
                   rows={3}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
@@ -344,75 +420,74 @@ export default function Home() {
                     }
                   }}
                 />
-                <div className="home-attach-buttons">
-                  <button type="button" className="home-attach-btn" onClick={() => imageInputRef.current?.click()} title="Attach image">
-                    <i className="fas fa-image" />
-                  </button>
-                  <button type="button" className="home-attach-btn" onClick={() => audioInputRef.current?.click()} title="Attach audio">
-                    <i className="fas fa-microphone" />
-                  </button>
-                  <button type="button" className="home-attach-btn" onClick={() => fileInputRef.current?.click()} title="Attach file">
-                    <i className="fas fa-file" />
+                <div className="home-input-footer">
+                  <div className="home-attach-buttons">
+                    <button type="button" className="home-attach-btn" onClick={() => imageInputRef.current?.click()} title={t('input.attachImage')}>
+                      <i className="fas fa-image" />
+                    </button>
+                    <button type="button" className="home-attach-btn" onClick={() => audioInputRef.current?.click()} title={t('input.attachAudio')}>
+                      <i className="fas fa-microphone" />
+                    </button>
+                    <button type="button" className="home-attach-btn" onClick={() => fileInputRef.current?.click()} title={t('input.attachFile')}>
+                      <i className="fas fa-file" />
+                    </button>
+                  </div>
+                  <span className="home-input-hint">{t('input.enterToSend')}</span>
+                  <button
+                    type="submit"
+                    className="home-send-btn"
+                    disabled={!selectedModel}
+                    title={!selectedModel ? t('input.selectModelFirst') : t('input.sendMessage')}
+                  >
+                    <i className="fas fa-arrow-up" />
                   </button>
                 </div>
                 <input ref={imageInputRef} type="file" multiple accept="image/*" style={{ display: 'none' }} onChange={(e) => addFiles(e.target.files, setImageFiles)} />
                 <input ref={audioInputRef} type="file" multiple accept="audio/*" style={{ display: 'none' }} onChange={(e) => addFiles(e.target.files, setAudioFiles)} />
                 <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.pdf" style={{ display: 'none' }} onChange={(e) => addFiles(e.target.files, setTextFiles)} />
               </div>
-
-              <button
-                type="submit"
-                className="home-send-btn"
-                disabled={!selectedModel}
-              >
-                <i className="fas fa-paper-plane" /> Send
-              </button>
             </form>
           </div>
 
           {/* Quick links */}
           <div className="home-quick-links">
-            <button className="home-link-btn" onClick={() => navigate('/manage')}>
-              <i className="fas fa-desktop" /> Installed Models and Backends
-            </button>
-            <button className="home-link-btn" onClick={() => navigate('/browse')}>
-              <i className="fas fa-download" /> Browse Gallery
-            </button>
-            <button className="home-link-btn" onClick={() => navigate('/import-model')}>
-              <i className="fas fa-upload" /> Import Model
-            </button>
+            {isAdmin && (
+              <>
+                {assistantAvailable && assistantUsed && (
+                  <button
+                    className="home-link-btn"
+                    onClick={openAssistantChat}
+                    title={t('assistant.tooltip')}
+                  >
+                    <i className="fas fa-user-shield" /> {t('quickLinks.manageByChat')}
+                  </button>
+                )}
+                <button className="home-link-btn" onClick={() => navigate('/app/manage')}>
+                  <i className="fas fa-desktop" /> {t('quickLinks.installedModels')}
+                </button>
+                <button className="home-link-btn" onClick={() => navigate('/app/models')}>
+                  <i className="fas fa-download" /> {t('quickLinks.browseGallery')}
+                </button>
+                <button className="home-link-btn" onClick={() => navigate('/app/import-model')}>
+                  <i className="fas fa-upload" /> {t('quickLinks.importModel')}
+                </button>
+              </>
+            )}
             <a className="home-link-btn" href="https://localai.io" target="_blank" rel="noopener noreferrer">
-              <i className="fas fa-book" /> Documentation
+              <i className="fas fa-book" /> {t('quickLinks.documentation')}
             </a>
           </div>
-
-          {/* Compact resource indicator */}
-          {resources && (
-            <div className="home-resource-pill">
-              <i className={`fas ${resType === 'gpu' ? 'fa-microchip' : 'fa-memory'}`} />
-              <span className="home-resource-label">{resType === 'gpu' ? 'GPU' : 'RAM'}</span>
-              <span className="home-resource-pct" style={{ color: pctColor }}>
-                {usagePct.toFixed(0)}%
-              </span>
-              <div className="home-resource-bar-track">
-                <div
-                  className="home-resource-bar-fill"
-                  style={{ width: `${usagePct}%`, background: pctColor }}
-                />
-              </div>
-            </div>
-          )}
 
           {/* Loaded models status */}
           {loadedCount > 0 && (
             <div className="home-loaded-models">
               <span className="home-loaded-dot" />
-              <span className="home-loaded-text">{loadedCount} model{loadedCount !== 1 ? 's' : ''} loaded</span>
+              <span className="home-loaded-text">{t('loadedModels.count', { count: loadedCount })}</span>
               <div className="home-loaded-list">
-                {loadedModels.map(m => (
+                {[...loadedModels].sort((a, b) => a.id.localeCompare(b.id)).map(m => (
                   <span key={m.id} className="home-loaded-item">
                     {m.id}
-                    <button onClick={() => handleStopModel(m.id)} title="Stop model">
+                    <button onClick={() => handleStopModel(m.id)} title={t('loadedModels.stop')}>
                       <i className="fas fa-times" />
                     </button>
                   </span>
@@ -420,431 +495,82 @@ export default function Home() {
               </div>
               {loadedCount > 1 && (
                 <button className="home-stop-all" onClick={handleStopAll}>
-                  Stop all
+                  {t('loadedModels.stopAll')}
                 </button>
               )}
             </div>
           )}
         </>
-      ) : (
-        /* No models installed wizard */
+      ) : isAdmin ? (
+        /* No models installed - compact getting started */
         <div className="home-wizard">
           <div className="home-wizard-hero">
-            <h1>No Models Installed</h1>
-            <p>Get started with LocalAI by installing your first model. Browse our gallery of open-source AI models.</p>
+            <img src={apiUrl(branding.logoUrl)} alt={branding.instanceName} className="home-logo" />
+            <h1>{t('wizard.getStarted', { name: branding.instanceName })}</h1>
+            <p>{t('wizard.intro')}</p>
           </div>
 
-          {/* Feature preview cards */}
-          <div className="home-wizard-features">
-            <div className="home-wizard-feature">
-              <div className="home-wizard-feature-icon" style={{ background: 'var(--color-primary-light)' }}>
-                <i className="fas fa-images" style={{ color: 'var(--color-primary)' }} />
-              </div>
-              <h3>Model Gallery</h3>
-              <p>Browse and install from a curated collection of open-source AI models</p>
-            </div>
-            <div className="home-wizard-feature" onClick={() => navigate('/import-model')} style={{ cursor: 'pointer' }}>
-              <div className="home-wizard-feature-icon" style={{ background: 'var(--color-accent-light)' }}>
-                <i className="fas fa-upload" style={{ color: 'var(--color-accent)' }} />
-              </div>
-              <h3>Import Models</h3>
-              <p>Import your own models from HuggingFace or local files</p>
-            </div>
-            <div className="home-wizard-feature">
-              <div className="home-wizard-feature-icon" style={{ background: 'var(--color-success-light)' }}>
-                <i className="fas fa-code" style={{ color: 'var(--color-success)' }} />
-              </div>
-              <h3>API Download</h3>
-              <p>Use the API to download and configure models programmatically</p>
-            </div>
-          </div>
-
-          {/* Setup steps */}
           <div className="home-wizard-steps card">
-            <h2>How to Get Started</h2>
             <div className="home-wizard-step">
               <div className="home-wizard-step-num">1</div>
               <div>
-                <strong>Browse the Model Gallery</strong>
-                <p>Visit the model gallery to find the right model for your needs.</p>
+                <strong>{t('wizard.steps.step1Title')}</strong>
+                <p>{t('wizard.steps.step1Body')}</p>
               </div>
             </div>
             <div className="home-wizard-step">
               <div className="home-wizard-step-num">2</div>
               <div>
-                <strong>Install a Model</strong>
-                <p>Click install on any model to download and configure it automatically.</p>
+                <strong>{t('wizard.steps.step2Title')}</strong>
+                <p>{t('wizard.steps.step2Body')}</p>
               </div>
             </div>
             <div className="home-wizard-step">
               <div className="home-wizard-step-num">3</div>
               <div>
-                <strong>Start Chatting</strong>
-                <p>Once installed, you can chat with your model right from the browser.</p>
+                <strong>{t('wizard.steps.step3Title')}</strong>
+                <p>{t('wizard.steps.step3Body')}</p>
               </div>
             </div>
           </div>
 
-          {/* Action buttons */}
           <div className="home-wizard-actions">
-            <button className="btn btn-primary" onClick={() => navigate('/browse')}>
-              <i className="fas fa-store" /> Browse Model Gallery
+            <button className="btn btn-primary" onClick={() => navigate('/app/models')}>
+              <i className="fas fa-store" /> {t('wizard.browseGallery')}
             </button>
-            <button className="btn btn-secondary" onClick={() => navigate('/import-model')}>
-              <i className="fas fa-upload" /> Import Model
+            <button className="btn btn-secondary" onClick={() => navigate('/app/import-model')}>
+              <i className="fas fa-upload" /> {t('wizard.importModel')}
             </button>
             <a className="btn btn-secondary" href="https://localai.io/docs/getting-started" target="_blank" rel="noopener noreferrer">
-              <i className="fas fa-book" /> Getting Started
+              <i className="fas fa-book" /> {t('wizard.docs')}
+            </a>
+          </div>
+        </div>
+      ) : (
+        /* No models available (non-admin) */
+        <div className="home-wizard">
+          <div className="home-wizard-hero">
+            <img src={apiUrl(branding.logoUrl)} alt={branding.instanceName} className="home-logo" />
+            <h1>{t('wizard.noModelsTitle')}</h1>
+            <p>{t('wizard.noModelsBody')}</p>
+          </div>
+          <div className="home-wizard-actions">
+            <a className="btn btn-secondary" href="https://localai.io" target="_blank" rel="noopener noreferrer">
+              <i className="fas fa-book" /> {t('quickLinks.documentation')}
             </a>
           </div>
         </div>
       )}
 
-      <style>{`
-        .home-page {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          max-width: 48rem;
-          margin: 0 auto;
-          padding: var(--spacing-xl);
-          width: 100%;
-        }
-        .home-hero {
-          text-align: center;
-          padding: var(--spacing-lg) 0;
-        }
-        .home-logo {
-          width: 80px;
-          height: auto;
-          margin: 0 auto var(--spacing-md);
-          display: block;
-        }
-        .home-heading {
-          font-size: 1.5rem;
-          font-weight: 600;
-          margin-bottom: var(--spacing-xs);
-        }
-        .home-subheading {
-          font-size: 0.875rem;
-          color: var(--color-text-secondary);
-        }
-
-        /* Chat card */
-        .home-chat-card {
-          width: 100%;
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border-subtle);
-          border-radius: var(--radius-lg);
-          padding: var(--spacing-md);
-          margin-bottom: var(--spacing-md);
-        }
-        .home-model-row {
-          display: flex;
-          align-items: center;
-          gap: var(--spacing-sm);
-          margin-bottom: var(--spacing-sm);
-        }
-        .home-file-tags {
-          display: flex;
-          flex-wrap: wrap;
-          gap: var(--spacing-xs);
-          margin-bottom: var(--spacing-sm);
-        }
-        .home-file-tag {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-          padding: 2px 8px;
-          background: var(--color-bg-tertiary);
-          border: 1px solid var(--color-border-subtle);
-          border-radius: var(--radius-full);
-          font-size: 0.75rem;
-          color: var(--color-text-secondary);
-        }
-        .home-file-tag button {
-          background: none;
-          border: none;
-          color: var(--color-text-muted);
-          cursor: pointer;
-          padding: 0;
-          font-size: 0.625rem;
-        }
-        .home-input-area {
-          position: relative;
-          margin-bottom: var(--spacing-sm);
-        }
-        .home-textarea {
-          width: 100%;
-          background: var(--color-bg-tertiary);
-          color: var(--color-text-primary);
-          border: 1px solid var(--color-border-default);
-          border-radius: var(--radius-md);
-          padding: var(--spacing-sm) var(--spacing-md);
-          padding-right: 7rem;
-          font-size: 0.875rem;
-          font-family: inherit;
-          outline: none;
-          resize: none;
-          min-height: 80px;
-          transition: border-color var(--duration-fast);
-        }
-        .home-textarea:focus { border-color: var(--color-border-strong); }
-        .home-attach-buttons {
-          position: absolute;
-          right: var(--spacing-sm);
-          bottom: var(--spacing-sm);
-          display: flex;
-          gap: 4px;
-        }
-        .home-attach-btn {
-          background: none;
-          border: none;
-          color: var(--color-text-muted);
-          cursor: pointer;
-          padding: 4px 6px;
-          font-size: 0.875rem;
-          border-radius: var(--radius-sm);
-          transition: color var(--duration-fast);
-        }
-        .home-attach-btn:hover { color: var(--color-primary); }
-        .home-send-btn {
-          display: flex;
-          align-items: center;
-          gap: var(--spacing-xs);
-          padding: var(--spacing-sm) var(--spacing-lg);
-          background: var(--color-primary);
-          color: var(--color-primary-text);
-          border: none;
-          border-radius: var(--radius-md);
-          font-size: 0.875rem;
-          font-family: inherit;
-          cursor: pointer;
-          margin-left: auto;
-          transition: background var(--duration-fast);
-        }
-        .home-send-btn:hover:not(:disabled) { background: var(--color-primary-hover); }
-        .home-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-        /* Quick links */
-        .home-quick-links {
-          display: flex;
-          flex-wrap: wrap;
-          gap: var(--spacing-sm);
-          justify-content: center;
-          margin: var(--spacing-md) 0;
-        }
-        .home-link-btn {
-          display: inline-flex;
-          align-items: center;
-          gap: var(--spacing-xs);
-          padding: var(--spacing-xs) var(--spacing-md);
-          background: var(--color-bg-tertiary);
-          color: var(--color-text-secondary);
-          border: 1px solid var(--color-border-subtle);
-          border-radius: var(--radius-full);
-          font-size: 0.8125rem;
-          font-family: inherit;
-          cursor: pointer;
-          text-decoration: none;
-          transition: all var(--duration-fast);
-        }
-        .home-link-btn:hover {
-          border-color: var(--color-primary-border);
-          color: var(--color-primary);
-        }
-
-        /* Resource pill */
-        .home-resource-pill {
-          display: flex;
-          align-items: center;
-          gap: var(--spacing-xs);
-          padding: var(--spacing-xs) var(--spacing-sm);
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border-subtle);
-          border-radius: var(--radius-full);
-          font-size: 0.75rem;
-          color: var(--color-text-secondary);
-          margin: var(--spacing-sm) 0;
-        }
-        .home-resource-label {
-          font-weight: 500;
-        }
-        .home-resource-pct {
-          font-family: 'JetBrains Mono', monospace;
-          font-weight: 500;
-        }
-        .home-resource-bar-track {
-          width: 16px;
-          height: 6px;
-          background: var(--color-bg-tertiary);
-          border-radius: 3px;
-          overflow: hidden;
-        }
-        .home-resource-bar-fill {
-          height: 100%;
-          border-radius: 3px;
-          transition: width 500ms ease;
-        }
-
-        /* Loaded models */
-        .home-loaded-models {
-          display: flex;
-          flex-wrap: wrap;
-          align-items: center;
-          gap: var(--spacing-xs);
-          padding: var(--spacing-sm);
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border-subtle);
-          border-radius: var(--radius-lg);
-          font-size: 0.8125rem;
-          color: var(--color-text-secondary);
-          width: 100%;
-        }
-        .home-loaded-dot {
-          width: 6px;
-          height: 6px;
-          border-radius: 50%;
-          background: var(--color-success);
-        }
-        .home-loaded-text {
-          font-weight: 500;
-          margin-right: var(--spacing-xs);
-        }
-        .home-loaded-list {
-          display: flex;
-          flex-wrap: wrap;
-          gap: var(--spacing-xs);
-        }
-        .home-loaded-item {
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-          padding: 2px 8px;
-          background: var(--color-bg-tertiary);
-          border-radius: var(--radius-full);
-          font-size: 0.75rem;
-        }
-        .home-loaded-item button {
-          background: none;
-          border: none;
-          color: var(--color-error);
-          cursor: pointer;
-          padding: 0;
-          font-size: 0.625rem;
-        }
-        .home-stop-all {
-          margin-left: auto;
-          background: none;
-          border: 1px solid var(--color-error);
-          color: var(--color-error);
-          padding: 2px 8px;
-          border-radius: var(--radius-full);
-          font-size: 0.75rem;
-          cursor: pointer;
-          font-family: inherit;
-        }
-
-        /* No models wizard */
-        .home-wizard {
-          max-width: 48rem;
-          width: 100%;
-        }
-        .home-wizard-hero {
-          text-align: center;
-          padding: var(--spacing-xl) 0;
-        }
-        .home-wizard-hero h1 {
-          font-size: 1.5rem;
-          font-weight: 600;
-          margin-bottom: var(--spacing-sm);
-        }
-        .home-wizard-hero p {
-          color: var(--color-text-secondary);
-          font-size: 0.9375rem;
-        }
-        .home-wizard-features {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: var(--spacing-md);
-          margin-bottom: var(--spacing-xl);
-        }
-        .home-wizard-feature {
-          text-align: center;
-          padding: var(--spacing-md);
-          background: var(--color-bg-secondary);
-          border: 1px solid var(--color-border-subtle);
-          border-radius: var(--radius-lg);
-        }
-        .home-wizard-feature-icon {
-          width: 48px;
-          height: 48px;
-          border-radius: 50%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          margin: 0 auto var(--spacing-sm);
-          font-size: 1.25rem;
-        }
-        .home-wizard-feature h3 {
-          font-size: 0.9375rem;
-          font-weight: 600;
-          margin-bottom: var(--spacing-xs);
-        }
-        .home-wizard-feature p {
-          font-size: 0.8125rem;
-          color: var(--color-text-secondary);
-          line-height: 1.4;
-        }
-        .home-wizard-steps {
-          margin-bottom: var(--spacing-xl);
-        }
-        .home-wizard-steps h2 {
-          font-size: 1.125rem;
-          font-weight: 600;
-          margin-bottom: var(--spacing-md);
-        }
-        .home-wizard-step {
-          display: flex;
-          gap: var(--spacing-md);
-          align-items: flex-start;
-          padding: var(--spacing-sm) 0;
-        }
-        .home-wizard-step-num {
-          width: 28px;
-          height: 28px;
-          border-radius: 50%;
-          background: var(--color-primary);
-          color: white;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 0.8125rem;
-          font-weight: 600;
-          flex-shrink: 0;
-        }
-        .home-wizard-step strong {
-          display: block;
-          margin-bottom: 2px;
-        }
-        .home-wizard-step p {
-          font-size: 0.8125rem;
-          color: var(--color-text-secondary);
-          margin: 0;
-        }
-        .home-wizard-actions {
-          display: flex;
-          gap: var(--spacing-sm);
-          justify-content: center;
-        }
-        @media (max-width: 640px) {
-          .home-wizard-features {
-            grid-template-columns: 1fr;
-          }
-        }
-      `}</style>
+      <ConfirmDialog
+        open={!!confirmDialog}
+        title={confirmDialog?.title}
+        message={confirmDialog?.message}
+        confirmLabel={confirmDialog?.confirmLabel}
+        danger={confirmDialog?.danger}
+        onConfirm={confirmDialog?.onConfirm}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </div>
   )
 }

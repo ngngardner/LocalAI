@@ -50,7 +50,7 @@ Function response:
 {{ end -}}
 <|eot_id|>`
 
-var llama3TestMatch map[string]map[string]interface{} = map[string]map[string]interface{}{
+var llama3TestMatch map[string]map[string]any = map[string]map[string]any{
 	"user": {
 		"expected": "<|start_header_id|>user<|end_header_id|>\n\nA long time ago in a galaxy far, far away...<|eot_id|>",
 		"config": &config.ModelConfig{
@@ -118,7 +118,7 @@ var llama3TestMatch map[string]map[string]interface{} = map[string]map[string]in
 	},
 }
 
-var chatMLTestMatch map[string]map[string]interface{} = map[string]map[string]interface{}{
+var chatMLTestMatch map[string]map[string]any = map[string]map[string]any{
 	"user": {
 		"expected": "<|im_start|>user\nA long time ago in a galaxy far, far away...<|im_end|>",
 		"config": &config.ModelConfig{
@@ -217,5 +217,42 @@ var _ = Describe("Templates", func() {
 				Expect(templated).To(Equal(foo["expected"]), templated)
 			})
 		}
+	})
+	// Regression test for mudler/LocalAI#10039: when a model has no Go-side
+	// TemplateConfig.ChatMessage block (e.g. backends that rely on the GGUF's
+	// jinja template), TemplateMessages falls through to the role-prefix path.
+	// That path must still render messages whose StringContent is populated but
+	// Content (any) is nil — which is the shape /v1/responses produced before
+	// the fix to convertORInputToMessages.
+	Context("fallback path with StringContent-only message (no ChatMessage template)", func() {
+		var evaluator *Evaluator
+		BeforeEach(func() {
+			evaluator = NewEvaluator("")
+		})
+		It("renders the role prefix and content when only StringContent is set", func() {
+			cfg := &config.ModelConfig{
+				TemplateConfig: config.TemplateConfig{},
+				Roles:          map[string]string{"user": "USER: "},
+			}
+			messages := []schema.Message{
+				{
+					Role:          "user",
+					StringContent: "hello",
+					// Content intentionally left nil — reproduces /v1/responses string-input.
+				},
+			}
+			templated := evaluator.TemplateMessages(schema.OpenAIRequest{}, messages, cfg, []functions.Function{}, false)
+			Expect(templated).To(Equal("USER: hello"), templated)
+		})
+		It("renders content even with no role mapping", func() {
+			cfg := &config.ModelConfig{
+				TemplateConfig: config.TemplateConfig{},
+			}
+			messages := []schema.Message{
+				{Role: "user", StringContent: "hello"},
+			}
+			templated := evaluator.TemplateMessages(schema.OpenAIRequest{}, messages, cfg, []functions.Function{}, false)
+			Expect(templated).To(Equal("hello"), templated)
+		})
 	})
 })

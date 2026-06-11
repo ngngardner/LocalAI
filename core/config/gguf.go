@@ -54,6 +54,13 @@ func guessGGUFFromFile(cfg *ModelConfig, f *gguf.GGUFFile, defaultCtx int) {
 		cfg.modelTemplate = chatTemplate.ValueString()
 	}
 
+	// Auto-enable Multi-Token Prediction (ggml-org/llama.cpp#22673) when the
+	// GGUF carries an embedded MTP head. Skipped silently for non-MTP models
+	// and when the user already configured a spec_type.
+	if n, ok := HasEmbeddedMTPHead(f); ok {
+		ApplyMTPDefaults(cfg, n)
+	}
+
 	// Thinking support detection is done after model load via DetectThinkingSupportFromBackend
 
 	// template estimations
@@ -76,12 +83,15 @@ func guessGGUFFromFile(cfg *ModelConfig, f *gguf.GGUFFile, defaultCtx int) {
 	cfg.Options = append(cfg.Options, "use_jinja:true")
 	cfg.KnownUsecaseStrings = append(cfg.KnownUsecaseStrings, "FLAG_CHAT")
 
+	// Apply per-model-family inference parameter defaults (temperature, top_p, etc.)
+	ApplyInferenceDefaults(cfg, f.Metadata().Name)
 }
 
 // DetectThinkingSupportFromBackend calls the ModelMetadata gRPC method to detect
 // if the model supports thinking mode and if the template ends with a thinking start token.
 // This should be called after the model is loaded.
 // The results are stored in cfg.SupportsThinking and cfg.ThinkingForcedOpen.
+// The backend-reported multimodal marker is also captured into cfg.MediaMarker.
 func DetectThinkingSupportFromBackend(ctx context.Context, cfg *ModelConfig, backendClient grpc.Backend, modelOptions *pb.ModelOptions) {
 	if backendClient == nil {
 		xlog.Debug("[gguf] DetectThinkingSupportFromBackend: backend client is nil, skipping detection")
@@ -93,9 +103,10 @@ func DetectThinkingSupportFromBackend(ctx context.Context, cfg *ModelConfig, bac
 		return
 	}
 
-	// Only detect for llama-cpp backend when using tokenizer templates
-	if cfg.Backend != "llama-cpp" || !cfg.TemplateConfig.UseTokenizerTemplate {
-		xlog.Debug("[gguf] DetectThinkingSupportFromBackend: skipping detection", "backend", cfg.Backend, "useTokenizerTemplate", cfg.TemplateConfig.UseTokenizerTemplate)
+	// Only llama-cpp exposes ModelMetadata today. Other backends will either error
+	// or return an empty response — both are fine, we just bail before calling.
+	if cfg.Backend != "llama-cpp" {
+		xlog.Debug("[gguf] DetectThinkingSupportFromBackend: skipping detection", "backend", cfg.Backend)
 		return
 	}
 
@@ -106,19 +117,22 @@ func DetectThinkingSupportFromBackend(ctx context.Context, cfg *ModelConfig, bac
 	}
 
 	if metadata != nil {
-		cfg.ReasoningConfig.DisableReasoning = ptr.To(!metadata.SupportsThinking)
-
-		// Use the rendered template to detect if thinking token is at the end
-		// This reuses the existing DetectThinkingStartToken function
-		if metadata.RenderedTemplate != "" {
-			thinkingStartToken := reasoning.DetectThinkingStartToken(metadata.RenderedTemplate, &cfg.ReasoningConfig)
-			thinkingForcedOpen := thinkingStartToken != ""
-			cfg.ReasoningConfig.DisableReasoningTagPrefill = ptr.To(!thinkingForcedOpen)
-			xlog.Debug("[gguf] DetectThinkingSupportFromBackend: thinking support detected", "supports_thinking", metadata.SupportsThinking, "thinking_forced_open", thinkingForcedOpen, "thinking_start_token", thinkingStartToken)
-		} else {
-			cfg.ReasoningConfig.DisableReasoningTagPrefill = ptr.To(true)
-			xlog.Debug("[gguf] DetectThinkingSupportFromBackend: thinking support detected", "supports_thinking", metadata.SupportsThinking, "thinking_forced_open", false)
+		// The multimodal media marker is backend-controlled (llama.cpp may pick a
+		// random per-server string). Empty means "no mtmd context" — Go falls back
+		// to templates.DefaultMultiMediaMarker at render time.
+		if metadata.MediaMarker != "" {
+			cfg.MediaMarker = metadata.MediaMarker
+			xlog.Debug("[gguf] DetectThinkingSupportFromBackend: media marker captured", "marker", metadata.MediaMarker)
 		}
+
+		// Thinking / tool-format detection only applies when we rely on the
+		// backend-side tokenizer template — otherwise the rendered-template based
+		// heuristics below aren't meaningful.
+		if !cfg.TemplateConfig.UseTokenizerTemplate {
+			return
+		}
+
+		applyDetectedThinkingConfig(cfg, metadata)
 
 		// Extract tool format markers from autoparser analysis
 		if tf := metadata.GetToolFormat(); tf != nil && tf.FormatType != "" {
@@ -143,7 +157,6 @@ func DetectThinkingSupportFromBackend(ctx context.Context, cfg *ModelConfig, bac
 				IDField:           tf.IdField,
 				FunNameIsKey:      tf.FunNameIsKey,
 				ToolsArrayWrapped: tf.ToolsArrayWrapped,
-				UsesPythonDicts:   tf.UsesPythonDicts,
 				FunctionField:     tf.FunctionField,
 				ParameterOrder:    tf.ParameterOrder,
 				GenIDField:        tf.GenIdField,
@@ -161,4 +174,35 @@ func DetectThinkingSupportFromBackend(ctx context.Context, cfg *ModelConfig, bac
 				"func_name_prefix", tf.FuncNamePrefix)
 		}
 	}
+}
+
+func applyDetectedThinkingConfig(cfg *ModelConfig, metadata *pb.ModelMetadataResponse) {
+	if cfg == nil || metadata == nil {
+		return
+	}
+
+	// Respect explicit YAML/user config. Backend probing should only fill defaults
+	// when the reasoning mode has not already been set.
+	if cfg.ReasoningConfig.DisableReasoning == nil {
+		cfg.ReasoningConfig.DisableReasoning = ptr.To(!metadata.SupportsThinking)
+	}
+
+	// Respect explicit prefill config for the same reason. Only infer the
+	// default prefill behavior when the user did not set it.
+	if cfg.ReasoningConfig.DisableReasoningTagPrefill == nil {
+		// Use the rendered template to detect if thinking token is at the end.
+		// This reuses the existing DetectThinkingStartToken function.
+		if metadata.RenderedTemplate != "" {
+			thinkingStartToken := reasoning.DetectThinkingStartToken(metadata.RenderedTemplate, &cfg.ReasoningConfig)
+			thinkingForcedOpen := thinkingStartToken != ""
+			cfg.ReasoningConfig.DisableReasoningTagPrefill = ptr.To(!thinkingForcedOpen)
+			xlog.Debug("[gguf] DetectThinkingSupportFromBackend: thinking support detected", "supports_thinking", metadata.SupportsThinking, "thinking_forced_open", thinkingForcedOpen, "thinking_start_token", thinkingStartToken)
+		} else {
+			cfg.ReasoningConfig.DisableReasoningTagPrefill = ptr.To(true)
+			xlog.Debug("[gguf] DetectThinkingSupportFromBackend: thinking support detected", "supports_thinking", metadata.SupportsThinking, "thinking_forced_open", false)
+		}
+		return
+	}
+
+	xlog.Debug("[gguf] DetectThinkingSupportFromBackend: preserving explicit reasoning config", "supports_thinking", metadata.SupportsThinking, "disable_reasoning", *cfg.ReasoningConfig.DisableReasoning, "disable_reasoning_tag_prefill", *cfg.ReasoningConfig.DisableReasoningTagPrefill)
 }

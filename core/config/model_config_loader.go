@@ -1,12 +1,13 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -192,9 +193,9 @@ func (bcl *ModelConfigLoader) ReadModelConfig(file string, opts ...ConfigLoaderO
 		bcl.configs[c.Name] = *c
 	} else {
 		if err != nil {
-			return fmt.Errorf("config is not valid: %w", err)
+			return fmt.Errorf("model config %q is not valid: %w. Ensure the YAML file has a valid 'name' field and correct syntax. See https://localai.io/docs/getting-started/customize-model/ for config reference", file, err)
 		}
-		return fmt.Errorf("config is not valid")
+		return fmt.Errorf("model config %q is not valid. Ensure the YAML file has a valid 'name' field and correct syntax. See https://localai.io/docs/getting-started/customize-model/ for config reference", file)
 	}
 
 	return nil
@@ -215,8 +216,8 @@ func (bcl *ModelConfigLoader) GetAllModelsConfigs() []ModelConfig {
 		res = append(res, v)
 	}
 
-	sort.SliceStable(res, func(i, j int) bool {
-		return res[i].Name < res[j].Name
+	slices.SortStableFunc(res, func(a, b ModelConfig) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	return res
@@ -246,6 +247,40 @@ func (bcl *ModelConfigLoader) RemoveModelConfig(m string) {
 	bcl.Lock()
 	defer bcl.Unlock()
 	delete(bcl.configs, m)
+}
+
+// GetModelsConflictingWith returns the names of every other configured (and
+// not-disabled) model that shares at least one concurrency group with the
+// named model. Returns nil if the named model has no groups, is unknown, or
+// has no peers in any of its groups. The result excludes the queried name.
+func (bcl *ModelConfigLoader) GetModelsConflictingWith(name string) []string {
+	bcl.Lock()
+	defer bcl.Unlock()
+	target, ok := bcl.configs[name]
+	if !ok {
+		return nil
+	}
+	targetGroups := target.GetConcurrencyGroups()
+	if len(targetGroups) == 0 {
+		return nil
+	}
+	var conflicts []string
+	for n, cfg := range bcl.configs {
+		if n == name || cfg.IsDisabled() {
+			continue
+		}
+		other := cfg.GetConcurrencyGroups()
+		if len(other) == 0 {
+			continue
+		}
+		for _, g := range targetGroups {
+			if slices.Contains(other, g) {
+				conflicts = append(conflicts, n)
+				break
+			}
+		}
+	}
+	return conflicts
 }
 
 // UpdateModelConfig updates an existing model config in the loader.
@@ -353,6 +388,49 @@ func (bcl *ModelConfigLoader) Preload(modelPath string) error {
 	return nil
 }
 
+// MITMHostOwnership is the result of mapping intercept hosts to the
+// model configs that claim them. The invariant the dispatcher relies
+// on: every host belongs to AT MOST one model config. Any duplicate
+// is surfaced via Conflicts and disables the MITM listener until
+// resolved — a half-applied "first wins" rule would silently mask
+// configuration drift, so we fail loud.
+type MITMHostOwnership struct {
+	// Owners maps lowercase hostname → owning model name. Empty when
+	// no model declares mitm.hosts.
+	Owners map[string]string
+	// Conflicts lists hosts claimed by 2+ configs, with the names of
+	// the configs that claim them. Non-empty Conflicts means callers
+	// must NOT start the MITM listener.
+	Conflicts map[string][]string
+}
+
+// MITMHostOwners walks every loaded ModelConfig's mitm.hosts, builds
+// the host→owner index, and reports any duplicates. The lookup table
+// is hostname-lowercased to match the Server's allowlist semantics.
+func (bcl *ModelConfigLoader) MITMHostOwners() MITMHostOwnership {
+	bcl.Lock()
+	defer bcl.Unlock()
+	owners := map[string]string{}
+	collisions := map[string][]string{}
+	for name, cfg := range bcl.configs {
+		for _, h := range cfg.MITM.Hosts {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" {
+				continue
+			}
+			if existing, ok := owners[h]; ok && existing != name {
+				if _, seen := collisions[h]; !seen {
+					collisions[h] = []string{existing}
+				}
+				collisions[h] = append(collisions[h], name)
+				continue
+			}
+			owners[h] = name
+		}
+	}
+	return MITMHostOwnership{Owners: owners, Conflicts: collisions}
+}
+
 // LoadModelConfigsFromPath reads all the configurations of the models from a path
 // (non-recursive)
 func (bcl *ModelConfigLoader) LoadModelConfigsFromPath(path string, opts ...ConfigLoaderOption) error {
@@ -372,9 +450,9 @@ func (bcl *ModelConfigLoader) LoadModelConfigsFromPath(path string, opts ...Conf
 		files = append(files, info)
 	}
 	for _, file := range files {
-		// Skip templates, YAML and .keep files
-		if !strings.Contains(file.Name(), ".yaml") && !strings.Contains(file.Name(), ".yml") ||
-			strings.HasPrefix(file.Name(), ".") {
+		// Only load real YAML config files and ignore dotfiles or backup variants
+		ext := strings.ToLower(filepath.Ext(file.Name()))
+		if (ext != ".yaml" && ext != ".yml") || strings.HasPrefix(file.Name(), ".") {
 			continue
 		}
 

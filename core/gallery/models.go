@@ -77,7 +77,7 @@ func InstallModelFromGallery(
 	modelGalleries, backendGalleries []lconfig.Gallery,
 	systemState *system.SystemState,
 	modelLoader *model.ModelLoader,
-	name string, req GalleryModel, downloadStatus func(string, string, string, float64), enforceScan, automaticallyInstallBackend bool) error {
+	name string, req GalleryModel, downloadStatus func(string, string, string, float64), enforceScan, automaticallyInstallBackend, requireBackendIntegrity bool) error {
 
 	applyModel := func(model *GalleryModel) error {
 		name = strings.ReplaceAll(name, string(os.PathSeparator), "__")
@@ -137,7 +137,7 @@ func InstallModelFromGallery(
 		if automaticallyInstallBackend && installedModel.Backend != "" {
 			xlog.Debug("Installing backend", "backend", installedModel.Backend)
 
-			if err := InstallBackendFromGallery(ctx, backendGalleries, systemState, modelLoader, installedModel.Backend, downloadStatus, false); err != nil {
+			if err := InstallBackendFromGallery(ctx, backendGalleries, systemState, modelLoader, installedModel.Backend, downloadStatus, false, requireBackendIntegrity); err != nil {
 				return err
 			}
 		}
@@ -158,7 +158,7 @@ func InstallModelFromGallery(
 	return applyModel(model)
 }
 
-func InstallModel(ctx context.Context, systemState *system.SystemState, nameOverride string, config *ModelConfig, configOverrides map[string]interface{}, downloadStatus func(string, string, string, float64), enforceScan bool) (*lconfig.ModelConfig, error) {
+func InstallModel(ctx context.Context, systemState *system.SystemState, nameOverride string, config *ModelConfig, configOverrides map[string]any, downloadStatus func(string, string, string, float64), enforceScan bool) (*lconfig.ModelConfig, error) {
 	basePath := systemState.Model.ModelsPath
 	// Create base path if it doesn't exist
 	err := os.MkdirAll(basePath, 0750)
@@ -239,7 +239,7 @@ func InstallModel(ctx context.Context, systemState *system.SystemState, nameOver
 		configFilePath := filepath.Join(basePath, name+".yaml")
 
 		// Read and update config file as map[string]interface{}
-		configMap := make(map[string]interface{})
+		configMap := make(map[string]any)
 		err = yaml.Unmarshal([]byte(config.ConfigFile), &configMap)
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config YAML: %v", err)
@@ -262,6 +262,49 @@ func InstallModel(ctx context.Context, systemState *system.SystemState, nameOver
 		err = yaml.Unmarshal(updatedConfigYAML, &modelConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal updated config YAML: %v", err)
+		}
+
+		// Apply model-family-specific inference defaults so they are persisted in the config YAML.
+		// Apply to the typed struct for validation, and merge into configMap for serialization
+		// (configMap preserves unknown fields that ModelConfig would drop).
+		lconfig.ApplyInferenceDefaults(&modelConfig, name, modelConfig.Model)
+
+		// Merge inference defaults into configMap so they are persisted without losing unknown fields.
+		if modelConfig.Temperature != nil {
+			if _, exists := configMap["temperature"]; !exists {
+				configMap["temperature"] = *modelConfig.Temperature
+			}
+		}
+		if modelConfig.TopP != nil {
+			if _, exists := configMap["top_p"]; !exists {
+				configMap["top_p"] = *modelConfig.TopP
+			}
+		}
+		if modelConfig.TopK != nil {
+			if _, exists := configMap["top_k"]; !exists {
+				configMap["top_k"] = *modelConfig.TopK
+			}
+		}
+		if modelConfig.MinP != nil {
+			if _, exists := configMap["min_p"]; !exists {
+				configMap["min_p"] = *modelConfig.MinP
+			}
+		}
+		if modelConfig.RepeatPenalty != 0 {
+			if _, exists := configMap["repeat_penalty"]; !exists {
+				configMap["repeat_penalty"] = modelConfig.RepeatPenalty
+			}
+		}
+		if modelConfig.PresencePenalty != 0 {
+			if _, exists := configMap["presence_penalty"]; !exists {
+				configMap["presence_penalty"] = modelConfig.PresencePenalty
+			}
+		}
+
+		// Re-marshal from configMap to preserve unknown fields
+		updatedConfigYAML, err = yaml.Marshal(configMap)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal config with inference defaults: %v", err)
 		}
 
 		if valid, err := modelConfig.Validate(); !valid {
@@ -290,6 +333,12 @@ func InstallModel(ctx context.Context, systemState *system.SystemState, nameOver
 
 func galleryFileName(name string) string {
 	return "._gallery_" + name + ".yaml"
+}
+
+// GalleryFileName returns the on-disk filename of the gallery metadata file
+// for a given installed model name (e.g. "._gallery_<name>.yaml").
+func GalleryFileName(name string) string {
+	return galleryFileName(name)
 }
 
 func GetLocalModelConfiguration(basePath string, name string) (*ModelConfig, error) {

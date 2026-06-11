@@ -1,9 +1,20 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { API_CONFIG } from '../utils/config'
+import { apiUrl } from '../utils/basePath'
+import { useDebouncedEffect } from './useDebounce'
 
-const thinkingTagRegex = /<thinking>([\s\S]*?)<\/thinking>|<think>([\s\S]*?)<\/think>/g
-const openThinkTagRegex = /<thinking>|<think>/
-const closeThinkTagRegex = /<\/thinking>|<\/think>/
+const thinkingTagRegex = /<thinking>([\s\S]*?)<\/thinking>|<think>([\s\S]*?)<\/think>|<\|channel>thought([\s\S]*?)<channel\|>/g
+const openThinkTagRegex = /<thinking>|<think>|<\|channel>thought/
+const closeThinkTagRegex = /<\/thinking>|<\/think>|<channel\|>/
+
+async function extractHttpError(response) {
+  let errorMsg = `HTTP ${response.status}`
+  try {
+    const errorData = await response.json()
+    if (errorData.error?.message) errorMsg = errorData.error.message
+  } catch (_) {}
+  return errorMsg
+}
 
 function extractThinking(text) {
   let regularContent = ''
@@ -13,19 +24,16 @@ function extractThinking(text) {
   thinkingTagRegex.lastIndex = 0
   while ((match = thinkingTagRegex.exec(text)) !== null) {
     regularContent += text.slice(lastIdx, match.index)
-    thinkingContent += match[1] || match[2] || ''
+    thinkingContent += match[1] || match[2] || match[3] || ''
     lastIdx = match.index + match[0].length
   }
   regularContent += text.slice(lastIdx)
   return { regularContent, thinkingContent }
 }
 
-const CHATS_STORAGE_KEY = 'localai_chats_data'
-const SAVE_DEBOUNCE_MS = 500
+import { generateId } from '../utils/format'
 
-function generateId() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2)
-}
+const CHATS_STORAGE_KEY = 'localai_chats_data'
 
 function loadChats() {
   try {
@@ -84,6 +92,9 @@ function createNewChat(model = '', systemPrompt = '', mcpMode = false) {
     mcpServers: [],
     mcpResources: [],
     clientMCPServers: [],
+    // localaiAssistant wires the chat to the in-process admin MCP server
+    // exposed by /v1/chat/completions when an admin opts in.
+    localaiAssistant: false,
     temperature: null,
     topP: null,
     topK: null,
@@ -115,24 +126,13 @@ export function useChat(initialModel = '') {
   const [tokensPerSecond, setTokensPerSecond] = useState(null)
   const [maxTokensPerSecond, setMaxTokensPerSecond] = useState(null)
   const abortControllerRef = useRef(null)
-  const saveTimerRef = useRef(null)
   const startTimeRef = useRef(null)
   const tokenCountRef = useRef(0)
   const maxTpsRef = useRef(0)
 
   const activeChat = chats.find(c => c.id === activeChatId) || chats[0]
 
-  // Debounced save
-  const debouncedSave = useCallback(() => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    saveTimerRef.current = setTimeout(() => {
-      saveChats(chats, activeChatId)
-    }, SAVE_DEBOUNCE_MS)
-  }, [chats, activeChatId])
-
-  useEffect(() => {
-    debouncedSave()
-  }, [chats, activeChatId, debouncedSave])
+  useDebouncedEffect(() => saveChats(chats, activeChatId), [chats, activeChatId])
 
   const addChat = useCallback((model = '', systemPrompt = '', mcpMode = false) => {
     const chat = createNewChat(model, systemPrompt, mcpMode)
@@ -197,7 +197,6 @@ export function useChat(initialModel = '') {
     const temperature = activeChat.temperature
     const topP = activeChat.topP
     const topK = activeChat.topK
-    const contextSize = activeChat.contextSize
 
     // Build user message content
     let messageContent
@@ -217,10 +216,22 @@ export function useChat(initialModel = '') {
             audio_url: { url: `data:${file.type};base64,${file.base64}` },
           })
           userFiles.push({ name: file.name, type: 'audio' })
+        } else if (file.type?.startsWith('video/')) {
+          messageContent.push({
+            type: 'video_url',
+            video_url: { url: `data:${file.type};base64,${file.base64}` },
+          })
+          userFiles.push({ name: file.name, type: 'video' })
         } else {
-          // Text/PDF files - append to content
-          userFiles.push({ name: file.name, type: 'file', content: file.textContent || '' })
-        }
+			// Text/PDF files - append to content
+			if (file.textContent) {
+				messageContent.push({
+					type: 'text',
+					text: `\n\n--- File: ${file.name} ---\n${file.textContent}\n--- End of ${file.name} ---`,
+				})
+			}
+			userFiles.push({ name: file.name, type: 'file', content: file.textContent || '' })
+		}
       }
     } else {
       messageContent = content
@@ -255,11 +266,17 @@ export function useChat(initialModel = '') {
     )
     messages.push(...historyForApi, { role: 'user', content: messageContent })
 
-    const requestBody = { model, messages, stream: true }
+    // include_usage tells LocalAI to emit a trailing chunk with token totals;
+    // without it the spec-compliant server drops `usage` from the stream and
+    // the token-count badge would never populate.
+    const requestBody = { model, messages, stream: true, stream_options: { include_usage: true } }
     if (temperature !== null && temperature !== undefined) requestBody.temperature = temperature
     if (topP !== null && topP !== undefined) requestBody.top_p = topP
     if (topK !== null && topK !== undefined) requestBody.top_k = topK
-    if (contextSize) requestBody.max_tokens = contextSize
+    // contextSize is the model's input+output window, not an
+    // output cap. Backends bound generation at remaining context
+    // automatically; Anthropic translate mode supplies its own
+    // default. So we deliberately do not send any output-token cap.
 
     // MCP: send selected servers via metadata so the backend activates them
     const hasMcpServers = activeChat.mcpServers && activeChat.mcpServers.length > 0
@@ -273,6 +290,14 @@ export function useChat(initialModel = '') {
     if (hasMcpResources) {
       if (!requestBody.metadata) requestBody.metadata = {}
       requestBody.metadata.mcp_resources = activeChat.mcpResources.join(',')
+    }
+
+    // LocalAI Assistant: opt this chat session into the in-process admin
+    // MCP server. The backend gates on admin role; the toggle is hidden
+    // for non-admins, but defense-in-depth still applies on the server.
+    if (activeChat.localaiAssistant) {
+      if (!requestBody.metadata) requestBody.metadata = {}
+      requestBody.metadata.localai_assistant = 'true'
     }
 
     // Client-side MCP: inject tools into request body
@@ -306,7 +331,7 @@ export function useChat(initialModel = '') {
       // Legacy MCP SSE streaming (custom event types from /v1/mcp/chat/completions)
       try {
         const timeoutId = setTimeout(() => controller.abort(), 300000) // 5 min timeout
-        const response = await fetch(endpoint, {
+        const response = await fetch(apiUrl(endpoint), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(requestBody),
@@ -315,7 +340,7 @@ export function useChat(initialModel = '') {
         clearTimeout(timeoutId)
 
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`)
+          throw new Error(await extractHttpError(response))
         }
 
         const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
@@ -403,7 +428,7 @@ export function useChat(initialModel = '') {
                   break
 
                 case 'error':
-                  newMessages.push({ role: 'assistant', content: `Error: ${eventData.message}` })
+                  newMessages.push({ role: 'assistant', content: `Error: ${eventData.message || eventData.error?.message || 'Unknown error'}` })
                   break
               }
             } catch (_e) {
@@ -452,7 +477,7 @@ export function useChat(initialModel = '') {
         let fullToolCalls = [] // Tool calls with id for agentic loop
 
         try {
-          const response = await fetch(endpoint, {
+          const response = await fetch(apiUrl(endpoint), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(loopBody),
@@ -460,7 +485,7 @@ export function useChat(initialModel = '') {
           })
 
           if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`)
+            throw new Error(await extractHttpError(response))
           }
 
           const reader = response.body.getReader()
@@ -483,6 +508,16 @@ export function useChat(initialModel = '') {
 
               try {
                 const parsed = JSON.parse(data)
+
+                // Handle structured error events
+                if (parsed.error) {
+                  const errMsg = typeof parsed.error === 'string'
+                    ? parsed.error
+                    : parsed.error.message || 'Unknown error'
+                  rawContent += `\n\nError: ${errMsg}`
+                  setStreamingContent(rawContent)
+                  continue
+                }
 
                 // Handle MCP tool result events
                 if (parsed?.type === 'mcp_tool_result') {
@@ -560,9 +595,9 @@ export function useChat(initialModel = '') {
                     }
 
                     if (insideThinkTag) {
-                      const lastOpen = Math.max(rawContent.lastIndexOf('<thinking>'), rawContent.lastIndexOf('<think>'))
+                      const lastOpen = Math.max(rawContent.lastIndexOf('<thinking>'), rawContent.lastIndexOf('<think>'), rawContent.lastIndexOf('<|channel>thought'))
                       if (lastOpen >= 0) {
-                        const partial = rawContent.slice(lastOpen).replace(/<thinking>|<think>/, '')
+                        const partial = rawContent.slice(lastOpen).replace(/<thinking>|<think>|<\|channel>thought/, '')
                         setStreamingReasoning(partial)
                         const beforeThink = rawContent.slice(0, lastOpen)
                         const { regularContent: contentBeforeThink } = extractThinking(beforeThink)

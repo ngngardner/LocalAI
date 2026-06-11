@@ -1,25 +1,15 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { useParams, useNavigate, useOutletContext } from 'react-router-dom'
+import { useParams, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import { agentsApi } from '../utils/api'
+import { apiUrl } from '../utils/basePath'
 import { renderMarkdown, highlightAll } from '../utils/markdown'
 import { extractCodeArtifacts, extractMetadataArtifacts, renderMarkdownWithArtifacts } from '../utils/artifacts'
 import CanvasPanel from '../components/CanvasPanel'
 import ResourceCards from '../components/ResourceCards'
+import ConfirmDialog from '../components/ConfirmDialog'
 import { useAgentChat } from '../hooks/useAgentChat'
-
-function relativeTime(ts) {
-  if (!ts) return ''
-  const diff = Date.now() - ts
-  const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return 'Just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days}d ago`
-  return new Date(ts).toLocaleDateString()
-}
+import { relativeTime } from '../utils/format'
+import { copyToClipboard } from '../utils/clipboard'
 
 function getLastMessagePreview(conv) {
   if (!conv.messages || conv.messages.length === 0) return ''
@@ -70,8 +60,7 @@ function AgentActivityGroup({ items }) {
             {items.map((item, idx) => (
               <div key={idx} className="chat-activity-item">
                 <span className="chat-activity-item-label">{new Date(item.timestamp).toLocaleTimeString()}</span>
-                <div className="chat-activity-item-content"
-                  dangerouslySetInnerHTML={{ __html: item.content }} />
+                <div className="chat-activity-item-content" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{item.content}</div>
               </div>
             ))}
           </div>
@@ -85,11 +74,13 @@ export default function AgentChat() {
   const { name } = useParams()
   const navigate = useNavigate()
   const { addToast } = useOutletContext()
+  const [searchParams] = useSearchParams()
+  const userId = searchParams.get('user_id') || undefined
 
   const {
     conversations, activeConversation, activeId,
     addConversation, switchConversation, deleteConversation,
-    deleteAllConversations, renameConversation, addMessage, clearMessages,
+    deleteAllConversations, renameConversation, addMessage, addMessageToConversation, clearMessages,
   } = useAgentChat(name)
 
   const messages = activeConversation?.messages || []
@@ -103,15 +94,27 @@ export default function AgentChat() {
   const [editingName, setEditingName] = useState(null)
   const [editName, setEditName] = useState('')
   const [chatSearch, setChatSearch] = useState('')
+  const [confirmDialog, setConfirmDialog] = useState(null)
+  const [streamContent, setStreamContent] = useState('')
+  const [streamReasoning, setStreamReasoning] = useState('')
+  const [streamToolCalls, setStreamToolCalls] = useState([])
   const messagesEndRef = useRef(null)
   const messagesRef = useRef(null)
   const textareaRef = useRef(null)
+  const stickToBottomRef = useRef(true)
   const eventSourceRef = useRef(null)
   const messageIdCounter = useRef(0)
   const addMessageRef = useRef(addMessage)
   addMessageRef.current = addMessage
+  const addMessageToConvRef = useRef(addMessageToConversation)
+  addMessageToConvRef.current = addMessageToConversation
   const activeIdRef = useRef(activeId)
   activeIdRef.current = activeId
+  // Tracks which conversation initiated the current request — SSE responses
+  // are pinned to this ID so switching tabs doesn't misdirect them.
+  const processingChatIdRef = useRef(null)
+  // Maps backend messageID → conversationId for robust SSE routing across navigations.
+  const pendingRequestsRef = useRef(new Map())
 
   const processing = processingChatId === activeId
 
@@ -122,23 +125,41 @@ export default function AgentChat() {
 
   // Connect to SSE endpoint — only reconnect when agent name changes
   useEffect(() => {
-    const url = `/api/agents/${encodeURIComponent(name)}/sse`
+    const url = apiUrl(agentsApi.sseUrl(name, userId))
     const es = new EventSource(url)
     eventSourceRef.current = es
 
     es.addEventListener('json_message', (e) => {
       try {
         const data = JSON.parse(e.data)
+        const sender = data.sender || (data.role === 'user' ? 'user' : 'agent')
+        // Skip user message echoes — already added locally in handleSend
+        if (sender === 'user') return
         const msg = {
           id: nextId(),
-          sender: data.sender || (data.role === 'user' ? 'user' : 'agent'),
+          sender,
           content: data.content || data.message || '',
-          timestamp: data.timestamp || Date.now(),
+          timestamp: data.timestamp ? Math.floor(data.timestamp / 1e6) : Date.now(),
         }
         if (data.metadata && Object.keys(data.metadata).length > 0) {
           msg.metadata = data.metadata
         }
-        addMessageRef.current(msg)
+        // Route to conversation: try messageID mapping first, then processingChatIdRef, then active
+        const msgId = data.message_id || ''
+        const baseId = msgId.replace(/-agent$/, '')
+        const targetId = pendingRequestsRef.current.get(baseId)
+          || processingChatIdRef.current
+          || activeIdRef.current
+        addMessageToConvRef.current(targetId, msg)
+        // Clear streaming + processing state when the final agent message arrives
+        if (sender === 'agent') {
+          pendingRequestsRef.current.delete(baseId)
+          processingChatIdRef.current = null
+          setProcessingChatId(null)
+          setStreamContent('')
+          setStreamReasoning('')
+          setStreamToolCalls([])
+        }
       } catch (_err) {
         // ignore malformed messages
       }
@@ -148,9 +169,57 @@ export default function AgentChat() {
       try {
         const data = JSON.parse(e.data)
         if (data.status === 'processing') {
-          setProcessingChatId(activeIdRef.current)
+          // Track which conversation is processing so responses go to the right place.
+          // Only set if not already pinned by handleSend (avoids race when user switches conversations).
+          if (!processingChatIdRef.current) {
+            processingChatIdRef.current = activeIdRef.current
+            setProcessingChatId(activeIdRef.current)
+          }
+          setStreamContent('')
+          setStreamReasoning('')
+          setStreamToolCalls([])
         } else if (data.status === 'completed') {
-          setProcessingChatId(null)
+          // Don't clear processingChatIdRef, processingChatId, or streaming state here —
+          // they'll be cleared when the agent's json_message arrives,
+          // so reasoning and tool calls remain visible until the response replaces them
+          // and late-arriving messages still route to the correct conversation.
+        }
+      } catch (_err) {
+        // ignore
+      }
+    })
+
+    es.addEventListener('stream_event', (e) => {
+      try {
+        const data = JSON.parse(e.data)
+        if (data.type === 'reasoning') {
+          setStreamReasoning(prev => prev + (data.content || ''))
+        } else if (data.type === 'content') {
+          setStreamContent(prev => prev + (data.content || ''))
+        } else if (data.type === 'tool_call') {
+          const name = data.tool_name || ''
+          const args = data.tool_args || ''
+          setStreamToolCalls(prev => {
+            if (name) {
+              return [...prev, { name, args }]
+            }
+            if (prev.length === 0) return prev
+            const updated = [...prev]
+            updated[updated.length - 1] = { ...updated[updated.length - 1], args: updated[updated.length - 1].args + args }
+            return updated
+          })
+        } else if (data.type === 'tool_result') {
+          const tname = data.tool_name || ''
+          setStreamToolCalls(prev => {
+            const updated = [...prev]
+            const idx = updated.findLastIndex(tc => tc.name === tname && !tc.result)
+            if (idx >= 0) {
+              updated[idx] = { ...updated[idx], result: data.tool_result || 'done' }
+            }
+            return updated
+          })
+        } else if (data.type === 'done') {
+          // Content will be finalized by json_message event
         }
       } catch (_err) {
         // ignore
@@ -160,7 +229,8 @@ export default function AgentChat() {
     es.addEventListener('status', (e) => {
       const text = e.data
       if (!text) return
-      addMessageRef.current({
+      const targetId = processingChatIdRef.current || activeIdRef.current
+      addMessageToConvRef.current(targetId, {
         id: nextId(),
         sender: 'system',
         content: text,
@@ -175,6 +245,7 @@ export default function AgentChat() {
       } catch (_err) {
         addToast('Agent error', 'error')
       }
+      processingChatIdRef.current = null
       setProcessingChatId(null)
     })
 
@@ -185,13 +256,35 @@ export default function AgentChat() {
     return () => {
       es.close()
       eventSourceRef.current = null
+      processingChatIdRef.current = null
+      pendingRequestsRef.current.clear()
     }
-  }, [name, addToast, nextId])
+  }, [name, userId, addToast, nextId])
 
-  // Auto-scroll to bottom
+  // Track whether the user is pinned to the bottom. If they scroll up
+  // while a response is streaming, stop forcing them back down.
   useEffect(() => {
+    const el = messagesRef.current
+    if (!el) return
+    const onScroll = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      stickToBottomRef.current = distanceFromBottom < 80
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
+  // Auto-scroll only when the user hasn't scrolled away from the bottom.
+  useEffect(() => {
+    if (!stickToBottomRef.current) return
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, streamContent, streamReasoning, streamToolCalls])
+
+  // When switching conversations, snap to bottom and re-pin.
+  useEffect(() => {
+    stickToBottomRef.current = true
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto' })
+  }, [activeId])
 
   // Highlight code blocks
   useEffect(() => {
@@ -266,25 +359,45 @@ export default function AgentChat() {
     if (!msg || processing) return
     setInput('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    // Add user message locally immediately (like standard chat)
+    addMessage({ id: nextId(), sender: 'user', content: msg, timestamp: Date.now() })
     setProcessingChatId(activeId)
+    processingChatIdRef.current = activeId
     try {
-      await agentsApi.chat(name, msg)
+      const resp = await agentsApi.chat(name, msg, userId)
+      // Map backend messageID → conversation so SSE events route correctly
+      if (resp && resp.message_id) {
+        pendingRequestsRef.current.set(resp.message_id, activeId)
+      }
     } catch (err) {
       addToast(`Failed to send message: ${err.message}`, 'error')
+      processingChatIdRef.current = null
       setProcessingChatId(null)
     }
-  }, [input, processing, name, activeId, addToast])
+  }, [input, processing, name, activeId, addToast, userId, addMessage, nextId])
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (
+      e.key === 'Enter' &&
+      !e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      !e.nativeEvent?.isComposing &&
+      e.keyCode !== 229
+    ) {
       e.preventDefault()
       handleSend()
     }
   }
 
-  const copyMessage = (content) => {
-    navigator.clipboard.writeText(content)
-    addToast('Copied to clipboard', 'success', 2000)
+  const copyMessage = async (content) => {
+    const ok = await copyToClipboard(content)
+    addToast(
+      ok ? 'Copied to clipboard' : 'Could not copy to clipboard',
+      ok ? 'success' : 'error',
+      ok ? 2000 : 3000,
+    )
   }
 
   const senderToRole = (sender) => {
@@ -326,7 +439,13 @@ export default function AgentChat() {
           <button
             className="btn btn-secondary btn-sm"
             onClick={() => {
-              if (confirm('Delete all conversations? This cannot be undone.')) deleteAllConversations()
+              setConfirmDialog({
+                title: 'Delete All Conversations',
+                message: 'Delete all conversations? This cannot be undone.',
+                confirmLabel: 'Delete All',
+                danger: true,
+                onConfirm: () => { setConfirmDialog(null); deleteAllConversations() },
+              })
             }}
             title="Delete all conversations"
             style={{ padding: '6px 8px' }}
@@ -456,7 +575,7 @@ export default function AgentChat() {
               <i className="fas fa-layer-group" /> {artifacts.length}
             </button>
           )}
-          <button className="btn btn-secondary btn-sm" onClick={() => navigate(`/agents/${encodeURIComponent(name)}/status`)} title="View status & observables">
+          <button className="btn btn-secondary btn-sm" onClick={() => navigate(`/app/agents/${encodeURIComponent(name)}/status${userId ? `?user_id=${encodeURIComponent(userId)}` : ''}`)} title="View status & observables">
             <i className="fas fa-chart-bar" /> Status
           </button>
           <button className="btn btn-secondary btn-sm" onClick={() => clearMessages()} disabled={messages.length === 0} title="Clear chat history">
@@ -504,7 +623,7 @@ export default function AgentChat() {
                 <div className="chat-message-bubble">
                   <div className="chat-message-content">
                     {role === 'user' ? (
-                      <div dangerouslySetInnerHTML={{ __html: msg.content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>') }} />
+                      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{msg.content}</div>
                     ) : (
                       <div dangerouslySetInnerHTML={{
                         __html: canvasMode
@@ -536,7 +655,62 @@ export default function AgentChat() {
           flushSystem('end')
           return elements
         })()}
-        {processing && (
+        {processing && (streamReasoning || streamContent || streamToolCalls.length > 0) && (
+          <div className="chat-message chat-message-assistant">
+            <div className="chat-message-avatar">
+              <i className="fas fa-robot" />
+            </div>
+            <div className="chat-message-bubble">
+              {streamReasoning && (
+                <details className="chat-activity-group" open={!streamContent} style={{ marginBottom: streamContent ? 'var(--spacing-sm)' : 0 }}>
+                  <summary className="chat-activity-toggle" style={{ cursor: 'pointer' }}>
+                    <span className={`chat-activity-summary${!streamContent ? ' chat-activity-shimmer' : ''}`}>
+                      {streamContent ? 'Thinking' : 'Thinking...'}
+                    </span>
+                  </summary>
+                  <div className="chat-activity-details">
+                    <div className="chat-activity-item chat-activity-thinking">
+                      <div className="chat-activity-item-content chat-activity-live"
+                        dangerouslySetInnerHTML={{ __html: renderMarkdown(streamReasoning) }} />
+                    </div>
+                  </div>
+                </details>
+              )}
+              {streamToolCalls.length > 0 && (
+                <div className="chat-activity-group" style={{ marginBottom: 'var(--spacing-sm)' }}>
+                  {streamToolCalls.map((tc, idx) => (
+                    <details key={idx} className="chat-activity-item chat-activity-tool-call" style={{ padding: 'var(--spacing-xs) var(--spacing-sm)' }} open={!tc.result}>
+                      <summary className="chat-activity-item-label" style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 'var(--spacing-xs)' }}>
+                        <i className={`fas ${tc.result ? 'fa-check' : 'fa-bolt'}`} />
+                        <strong>{tc.name}</strong>
+                        <span style={{ opacity: 0.5, fontSize: '0.85em' }}>
+                          {tc.result ? 'done' : 'calling...'}
+                        </span>
+                      </summary>
+                      {tc.args && (
+                        <pre style={{ margin: '4px 0', fontSize: '0.75rem', opacity: 0.8, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                          {(() => { try { return JSON.stringify(JSON.parse(tc.args), null, 2) } catch { return tc.args } })()}
+                        </pre>
+                      )}
+                      {tc.result && (
+                        <pre style={{ margin: '4px 0', fontSize: '0.75rem', opacity: 0.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '200px', overflow: 'auto' }}>
+                          {tc.result}
+                        </pre>
+                      )}
+                    </details>
+                  ))}
+                </div>
+              )}
+              {streamContent && (
+                <div className="chat-message-content">
+                  <span dangerouslySetInnerHTML={{ __html: renderMarkdown(streamContent) }} />
+                  <span className="chat-streaming-cursor" />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {processing && !streamReasoning && !streamContent && streamToolCalls.length === 0 && (
           <div className="chat-message chat-message-assistant">
             <div className="chat-message-avatar" style={{ background: 'var(--color-bg-tertiary)', color: 'var(--color-text-muted)' }}>
               <i className="fas fa-cogs" />
@@ -587,6 +761,15 @@ export default function AgentChat() {
         onClose={() => setCanvasOpen(false)}
       />
     )}
+    <ConfirmDialog
+      open={!!confirmDialog}
+      title={confirmDialog?.title}
+      message={confirmDialog?.message}
+      confirmLabel={confirmDialog?.confirmLabel}
+      danger={confirmDialog?.danger}
+      onConfirm={confirmDialog?.onConfirm}
+      onCancel={() => setConfirmDialog(null)}
+    />
     </div>
   )
 }

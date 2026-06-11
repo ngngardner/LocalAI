@@ -318,6 +318,21 @@ _makeVenvPortable() {
 }
 
 
+# Apply the venv to the current process: VIRTUAL_ENV, PATH, PYTHONHOME hygiene.
+# Equivalent to the runtime portion of `source bin/activate`, but computed from
+# $EDIR (resolved at runtime via realpath) instead of the path baked into
+# bin/activate at venv-create time. `uv venv` (and `python -m venv`) both bake
+# the create-time absolute path in, so sourcing activate on a relocated venv —
+# e.g. one built at /vllm/venv inside a Docker stage and unpacked under
+# /backends/cuda13-vllm-development/venv at runtime — silently prepends a
+# stale, non-existent path to $PATH. Doing the setup ourselves sidesteps that;
+# this is the same approach `uv run` takes internally.
+_activateVenv() {
+    export VIRTUAL_ENV="${EDIR}/venv"
+    export PATH="${EDIR}/venv/bin:${PATH}"
+    unset PYTHONHOME
+}
+
 # ensureVenv makes sure that the venv for the backend both exists, and is activated.
 #
 # This function is idempotent, so you can call it as many times as you want and it will
@@ -344,8 +359,17 @@ function ensureVenv() {
 
     if [ ! -d "${EDIR}/venv" ]; then
         if [ "x${USE_PIP}" == "xtrue" ]; then
-            "${interpreter}" -m venv --copies "${EDIR}/venv"
-            source "${EDIR}/venv/bin/activate"
+            # --copies is only needed when we will later relocate the venv via
+            # _makeVenvPortable (PORTABLE_PYTHON=true). Some Python builds —
+            # notably macOS system Python — refuse to create a venv with
+            # --copies because the build doesn't support it. Fall back to
+            # symlinks in that case.
+            local venv_args=""
+            if [ "x${PORTABLE_PYTHON}" == "xtrue" ]; then
+                venv_args="--copies"
+            fi
+            "${interpreter}" -m venv ${venv_args} "${EDIR}/venv"
+            _activateVenv
             "${interpreter}" -m pip install --upgrade pip
         else
             if [ "x${PORTABLE_PYTHON}" == "xtrue" ]; then
@@ -366,7 +390,7 @@ function ensureVenv() {
     fi
 
     if [ "x${VIRTUAL_ENV:-}" != "x${EDIR}/venv" ]; then
-        source "${EDIR}/venv/bin/activate"
+        _activateVenv
     fi
 }
 

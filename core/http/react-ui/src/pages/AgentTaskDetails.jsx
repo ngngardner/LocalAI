@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate, useOutletContext, useLocation } from 'react-router-dom'
 import { agentJobsApi } from '../utils/api'
+import { basePath } from '../utils/basePath'
 import ModelSelector from '../components/ModelSelector'
+import { CAP_CHAT } from '../utils/capabilities'
 import LoadingSpinner from '../components/LoadingSpinner'
 
 export default function AgentTaskDetails() {
@@ -115,6 +117,8 @@ export default function AgentTaskDetails() {
           }
         })
         body.cron_parameters = params
+      } else if (!body.cron_parameters || body.cron_parameters === '') {
+        delete body.cron_parameters
       }
 
       // Parse webhook headers from JSON strings
@@ -140,7 +144,7 @@ export default function AgentTaskDetails() {
         await agentJobsApi.updateTask(id, body)
         addToast('Task updated', 'success')
       }
-      navigate('/agent-jobs')
+      navigate('/app/agent-jobs')
     } catch (err) {
       addToast(`Save failed: ${err.message}`, 'error')
     } finally {
@@ -155,22 +159,22 @@ export default function AgentTaskDetails() {
 
   const formatDate = (d) => d ? new Date(d).toLocaleString() : '-'
 
-  if (loading) return <div className="page" style={{ display: 'flex', justifyContent: 'center', padding: 'var(--spacing-xl)' }}><LoadingSpinner size="lg" /></div>
+  if (loading) return <div className="page page--narrow" style={{ display: 'flex', justifyContent: 'center', padding: 'var(--spacing-xl)' }}><LoadingSpinner size="lg" /></div>
 
   // View mode
   if (!isNew && !isEdit) {
     return (
-      <div className="page" style={{ maxWidth: 900 }}>
+      <div className="page page--narrow">
         <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <h1 className="page-title">{task.name || 'Task Details'}</h1>
             {task.description && <p className="page-subtitle">{task.description}</p>}
           </div>
           <div style={{ display: 'flex', gap: 'var(--spacing-sm)' }}>
-            <button className="btn btn-primary btn-sm" onClick={() => navigate(`/agent-jobs/tasks/${id}/edit`)}>
+            <button className="btn btn-primary btn-sm" onClick={() => navigate(`/app/agent-jobs/tasks/${id}/edit`)}>
               <i className="fas fa-edit" /> Edit
             </button>
-            <button className="btn btn-secondary btn-sm" onClick={() => navigate('/agent-jobs')}>
+            <button className="btn btn-secondary btn-sm" onClick={() => navigate('/app/agent-jobs')}>
               <i className="fas fa-arrow-left" /> Back
             </button>
           </div>
@@ -194,7 +198,7 @@ export default function AgentTaskDetails() {
             {task.cron && (
               <div>
                 <span className="form-label">Cron Schedule</span>
-                <p style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.8125rem' }}>{task.cron}</p>
+                <p style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}>{task.cron}</p>
               </div>
             )}
           </div>
@@ -225,22 +229,22 @@ export default function AgentTaskDetails() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--spacing-md)' }}>
             <div>
               <span className="form-label">Execute by name</span>
-              <pre style={{ background: 'var(--color-bg-primary)', padding: 'var(--spacing-sm)', borderRadius: 'var(--radius-md)', fontSize: '0.75rem', fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', overflow: 'auto' }}>
-{`curl -X POST ${window.location.origin}/api/agent/tasks/${encodeURIComponent(task.name)}/execute`}
+              <pre style={{ background: 'var(--color-bg-primary)', padding: 'var(--spacing-sm)', borderRadius: 'var(--radius-md)', fontSize: '0.75rem', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', overflow: 'auto' }}>
+{`curl -X POST ${window.location.origin}${basePath}/api/agent/tasks/${encodeURIComponent(task.name)}/execute`}
               </pre>
             </div>
             <div>
               <span className="form-label">Execute with multimedia</span>
-              <pre style={{ background: 'var(--color-bg-primary)', padding: 'var(--spacing-sm)', borderRadius: 'var(--radius-md)', fontSize: '0.75rem', fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', overflow: 'auto' }}>
-{`curl -X POST ${window.location.origin}/api/agent/tasks/${encodeURIComponent(task.name)}/execute \\
+              <pre style={{ background: 'var(--color-bg-primary)', padding: 'var(--spacing-sm)', borderRadius: 'var(--radius-md)', fontSize: '0.75rem', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', overflow: 'auto' }}>
+{`curl -X POST ${window.location.origin}${basePath}/api/agent/tasks/${encodeURIComponent(task.name)}/execute \\
   -H "Content-Type: application/json" \\
   -d '{"multimedia": {"images": [{"url": "https://example.com/image.jpg"}]}}'`}
               </pre>
             </div>
             <div>
               <span className="form-label">Check job status</span>
-              <pre style={{ background: 'var(--color-bg-primary)', padding: 'var(--spacing-sm)', borderRadius: 'var(--radius-md)', fontSize: '0.75rem', fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', overflow: 'auto' }}>
-{`curl ${window.location.origin}/api/agent/jobs/<job-id>`}
+              <pre style={{ background: 'var(--color-bg-primary)', padding: 'var(--spacing-sm)', borderRadius: 'var(--radius-md)', fontSize: '0.75rem', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', overflow: 'auto' }}>
+{`curl ${window.location.origin}${basePath}/api/agent/jobs/<job-id>`}
               </pre>
             </div>
           </div>
@@ -257,7 +261,7 @@ export default function AgentTaskDetails() {
               <div key={i} style={{ background: 'var(--color-bg-primary)', borderRadius: 'var(--radius-md)', padding: 'var(--spacing-sm)', marginBottom: 'var(--spacing-sm)' }}>
                 <div style={{ display: 'flex', gap: 'var(--spacing-sm)', fontSize: '0.8125rem' }}>
                   <span className="badge badge-info">{wh.method || 'POST'}</span>
-                  <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{wh.url}</span>
+                  <span style={{ fontFamily: 'var(--font-mono)' }}>{wh.url}</span>
                 </div>
               </div>
             ))}
@@ -279,13 +283,13 @@ export default function AgentTaskDetails() {
                 <tbody>
                   {jobHistory.map(job => (
                     <tr key={job.id}>
-                      <td style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.8125rem' }}>
+                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}>
                         {job.id?.slice(0, 12)}...
                       </td>
                       <td>{statusBadge(job.status)}</td>
                       <td style={{ fontSize: '0.8125rem', color: 'var(--color-text-secondary)' }}>{formatDate(job.created_at)}</td>
                       <td>
-                        <button className="btn btn-secondary btn-sm" onClick={() => navigate(`/agent-jobs/jobs/${job.id}`)}>
+                        <button className="btn btn-secondary btn-sm" onClick={() => navigate(`/app/agent-jobs/jobs/${job.id}`)}>
                           <i className="fas fa-eye" /> View
                         </button>
                       </td>
@@ -302,10 +306,10 @@ export default function AgentTaskDetails() {
 
   // Edit/Create form
   return (
-    <div className="page" style={{ maxWidth: 900 }}>
+    <div className="page page--narrow">
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1 className="page-title">{isNew ? 'Create Task' : 'Edit Task'}</h1>
-        <button className="btn btn-secondary btn-sm" onClick={() => navigate('/agent-jobs')}>
+        <button className="btn btn-secondary btn-sm" onClick={() => navigate('/app/agent-jobs')}>
           <i className="fas fa-arrow-left" /> Back
         </button>
       </div>
@@ -321,7 +325,7 @@ export default function AgentTaskDetails() {
             </div>
             <div className="form-group">
               <label className="form-label">Model</label>
-              <ModelSelector value={task.model} onChange={(model) => updateField('model', model)} capability="FLAG_CHAT" />
+              <ModelSelector value={task.model} onChange={(model) => updateField('model', model)} capability={CAP_CHAT} />
             </div>
           </div>
           <div className="form-group">
@@ -347,7 +351,7 @@ export default function AgentTaskDetails() {
               onChange={(e) => updateField('prompt', e.target.value)}
               rows={8}
               placeholder={`Write a summary about {{.topic}} in {{.format}} format.`}
-              style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.8125rem' }}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
             />
             <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: 'var(--spacing-xs)' }}>
               Use {'{{.parameter_name}}'} for dynamic parameters. Parameters are provided when executing the task.
@@ -372,7 +376,7 @@ export default function AgentTaskDetails() {
               value={task.cron}
               onChange={(e) => { updateField('cron', e.target.value); validateCron(e.target.value) }}
               placeholder="0 */6 * * *"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              style={{ fontFamily: 'var(--font-mono)' }}
             />
             {cronError && <p style={{ color: 'var(--color-error)', fontSize: '0.75rem', marginTop: 4 }}>{cronError}</p>}
             <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: 'var(--spacing-xs)' }}>
@@ -388,7 +392,7 @@ export default function AgentTaskDetails() {
                 onChange={(e) => updateField('cron_parameters', e.target.value)}
                 rows={3}
                 placeholder={`topic=daily news\nformat=bullet points`}
-                style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.8125rem' }}
+                style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
               />
               <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: 'var(--spacing-xs)' }}>
                 Default parameters used when the cron triggers the task.
@@ -433,7 +437,7 @@ export default function AgentTaskDetails() {
                 </div>
                 <div className="form-group" style={{ marginTop: 'var(--spacing-xs)' }}>
                   <label className="form-label">Headers (JSON)</label>
-                  <input className="input" value={ms.headers} onChange={(e) => updateMultimediaSource(i, 'headers', e.target.value)} placeholder='{"Authorization": "Bearer ..."}' style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.8125rem' }} />
+                  <input className="input" value={ms.headers} onChange={(e) => updateMultimediaSource(i, 'headers', e.target.value)} placeholder='{"Authorization": "Bearer ..."}' style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }} />
                 </div>
               </div>
             ))
@@ -475,7 +479,7 @@ export default function AgentTaskDetails() {
                 </div>
                 <div className="form-group" style={{ marginTop: 'var(--spacing-xs)' }}>
                   <label className="form-label">Headers (JSON)</label>
-                  <input className="input" value={wh.headers} onChange={(e) => updateWebhook(i, 'headers', e.target.value)} placeholder='{"Content-Type": "application/json"}' style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.8125rem' }} />
+                  <input className="input" value={wh.headers} onChange={(e) => updateWebhook(i, 'headers', e.target.value)} placeholder='{"Content-Type": "application/json"}' style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }} />
                 </div>
                 <div className="form-group" style={{ marginTop: 'var(--spacing-xs)' }}>
                   <label className="form-label">Payload Template (Go template syntax)</label>
@@ -485,7 +489,7 @@ export default function AgentTaskDetails() {
                     onChange={(e) => updateWebhook(i, 'payload_template', e.target.value)}
                     rows={3}
                     placeholder={`{"text": "Job {{.Status}}: {{if .Error}}Error: {{.Error}}{{else}}{{.Result}}{{end}}"}`}
-                    style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.8125rem' }}
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem' }}
                   />
                   <p style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: 2 }}>
                     Available: {'{{.Job}}'} {'{{.Task}}'} {'{{.Result}}'} {'{{.Error}}'} {'{{.Status}}'}
@@ -500,7 +504,7 @@ export default function AgentTaskDetails() {
           <button type="submit" className="btn btn-primary" disabled={saving}>
             {saving ? <><i className="fas fa-spinner fa-spin" /> Saving...</> : <><i className="fas fa-save" /> {isNew ? 'Create Task' : 'Save Changes'}</>}
           </button>
-          <button type="button" className="btn btn-secondary" onClick={() => navigate('/agent-jobs')}>Cancel</button>
+          <button type="button" className="btn btn-secondary" onClick={() => navigate('/app/agent-jobs')}>Cancel</button>
         </div>
       </form>
     </div>

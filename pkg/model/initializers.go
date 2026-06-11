@@ -14,15 +14,17 @@ import (
 )
 
 const (
-	LLamaCPP = "llama-cpp"
+	LLamaCPP   = "llama-cpp"
+	IKLLamaCPP = "ik-llama-cpp"
 )
 
 var Aliases = map[string]string{
 	"go-llama":               LLamaCPP,
 	"llama":                  LLamaCPP,
+	"ik_llama":               IKLLamaCPP,
+	"ik-llama":               IKLLamaCPP,
 	"embedded-store":         LocalStoreBackend,
 	"huggingface-embeddings": TransformersBackend,
-	"langchain-huggingface":  LCHuggingFaceBackend,
 	"transformers-musicgen":  TransformersBackend,
 	"sentencetransformers":   TransformersBackend,
 	"mamba":                  TransformersBackend,
@@ -39,7 +41,6 @@ var TypeAlias = map[string]string{
 const (
 	WhisperBackend             = "whisper"
 	StableDiffusionGGMLBackend = "stablediffusion-ggml"
-	LCHuggingFaceBackend       = "huggingface"
 
 	TransformersBackend = "transformers"
 	LocalStoreBackend   = "local-store"
@@ -51,6 +52,15 @@ func (ml *ModelLoader) grpcModel(backend string, o *Options) func(string, string
 	return func(modelID, modelName, modelFile string) (*Model, error) {
 
 		xlog.Debug("Loading Model with gRPC", "modelID", modelID, "file", modelFile, "backend", backend, "options", *o)
+
+		// Distributed mode: delegate to the model router if set
+		ml.mu.Lock()
+		router := ml.modelRouter
+		ml.mu.Unlock()
+		if router != nil {
+			xlog.Info("Routing model to remote node via ModelRouter", "modelID", modelID, "backend", backend)
+			return router(o.context, backend, modelID, modelName, modelFile, o.gRPCOptions, o.parallelRequests)
+		}
 
 		var client *Model
 
@@ -107,7 +117,7 @@ func (ml *ModelLoader) grpcModel(backend string, o *Options) func(string, string
 
 		// Wait for the service to start up
 		ready := false
-		for i := 0; i < o.grpcAttempts; i++ {
+		for i := range o.grpcAttempts {
 			alive, err := client.GRPC(o.parallelRequests, ml.wd).HealthCheck(context.Background())
 			if alive {
 				xlog.Debug("GRPC Service Ready")
@@ -173,14 +183,47 @@ func (ml *ModelLoader) backendLoader(opts ...Option) (client grpc.Backend, err e
 
 	model, err := ml.LoadModel(o.modelID, o.model, ml.grpcModel(backend, o))
 	if err != nil {
+		// Defensive cleanup: the model usually wasn't registered yet (LoadModel
+		// failed before that), so StopGRPC reporting "model not found" is the
+		// expected case, not an error. The outer Failed-to-load log below
+		// carries the real reason.
 		if stopErr := ml.StopGRPC(only(o.modelID)); stopErr != nil {
-			xlog.Error("error stopping model", "error", stopErr, "model", o.modelID)
+			xlog.Debug("cleanup stop after failed load", "error", stopErr, "model", o.modelID)
 		}
 		xlog.Error("Failed to load model", "modelID", o.modelID, "error", err, "backend", o.backendString)
 		return nil, err
 	}
 
 	return model.GRPC(o.parallelRequests, ml.wd), nil
+}
+
+// retryEnforce repeatedly invokes fn until it returns NeedMore=false or the
+// retry budget is exhausted. It sleeps `retryInterval` between attempts and
+// logs progress under `label`. Used by both LRU and group-exclusivity
+// enforcement so the busy-model wait behaviour is identical.
+func retryEnforce(fn func() EnforceLRULimitResult, maxRetries int, retryInterval time.Duration, label string) {
+	for attempt := range maxRetries {
+		result := fn()
+		if !result.NeedMore {
+			if result.EvictedCount > 0 {
+				xlog.Info("[ModelLoader] "+label+" enforcement complete", "evicted", result.EvictedCount)
+			}
+			return
+		}
+		if attempt < maxRetries-1 {
+			xlog.Info("[ModelLoader] Waiting for busy models to become idle before eviction",
+				"label", label,
+				"evicted", result.EvictedCount,
+				"attempt", attempt+1,
+				"maxRetries", maxRetries,
+				"retryIn", retryInterval)
+			time.Sleep(retryInterval)
+		} else {
+			xlog.Warn("[ModelLoader] "+label+" enforcement incomplete after max retries",
+				"evicted", result.EvictedCount,
+				"reason", "conflicts are still busy or pinned")
+		}
+	}
 }
 
 // enforceLRULimit enforces the LRU limit before loading a new model.
@@ -192,41 +235,34 @@ func (ml *ModelLoader) enforceLRULimit() {
 		return
 	}
 
-	// Get the count of models currently being loaded to account for concurrent requests
 	pendingLoads := ml.GetLoadingCount()
 
-	// Get retry settings from ModelLoader
 	ml.mu.Lock()
 	maxRetries := ml.lruEvictionMaxRetries
 	retryInterval := ml.lruEvictionRetryInterval
 	ml.mu.Unlock()
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		result := ml.wd.EnforceLRULimit(pendingLoads)
+	retryEnforce(func() EnforceLRULimitResult {
+		return ml.wd.EnforceLRULimit(pendingLoads)
+	}, maxRetries, retryInterval, "LRU")
+}
 
-		if !result.NeedMore {
-			// Successfully evicted enough models (or no eviction needed)
-			if result.EvictedCount > 0 {
-				xlog.Info("[ModelLoader] LRU enforcement complete", "evicted", result.EvictedCount)
-			}
-			return
-		}
-
-		// Need more evictions but models are busy - wait and retry
-		if attempt < maxRetries-1 {
-			xlog.Info("[ModelLoader] Waiting for busy models to become idle before eviction",
-				"evicted", result.EvictedCount,
-				"attempt", attempt+1,
-				"maxRetries", maxRetries,
-				"retryIn", retryInterval)
-			time.Sleep(retryInterval)
-		} else {
-			// Last attempt - log warning but proceed (might fail to load, but at least we tried)
-			xlog.Warn("[ModelLoader] LRU enforcement incomplete after max retries",
-				"evicted", result.EvictedCount,
-				"reason", "models are still busy with active API calls")
-		}
+// enforceGroupExclusivity evicts every loaded model that shares a concurrency
+// group with modelID before loading proceeds. Reuses the LRU retry settings so
+// busy conflicts wait for the same window as a busy LRU eviction.
+func (ml *ModelLoader) enforceGroupExclusivity(modelID string) {
+	if ml.wd == nil {
+		return
 	}
+
+	ml.mu.Lock()
+	maxRetries := ml.lruEvictionMaxRetries
+	retryInterval := ml.lruEvictionRetryInterval
+	ml.mu.Unlock()
+
+	retryEnforce(func() EnforceLRULimitResult {
+		return ml.wd.EnforceGroupExclusivity(modelID)
+	}, maxRetries, retryInterval, "group-exclusivity")
 }
 
 // updateModelLastUsed updates the last used time for a model (for LRU tracking)
@@ -240,14 +276,58 @@ func (ml *ModelLoader) updateModelLastUsed(m *Model) {
 func (ml *ModelLoader) Load(opts ...Option) (grpc.Backend, error) {
 	o := NewOptions(opts...)
 
+	ml.mu.Lock()
+	distributed := ml.modelRouter != nil
+	ml.mu.Unlock()
+
+	// In distributed mode, SmartRouter must run per inference request so
+	// PickBestReplica (core/services/nodes/replicapicker.go) picks the
+	// least-loaded replica each time. Bypass the local cache and the local
+	// LRU / concurrency-group watchdog enforcement: both are scoped to the
+	// in-process Model store, which in distributed mode only holds stubs for
+	// remote replicas. SmartRouter handles cluster-wide eviction
+	// (evictLRUAndFreeNode) and concurrency-group anti-affinity
+	// (narrowByGroupAntiAffinity) at the scheduler layer.
+	//
+	// TODO(distributed-cache): see LoadModel for the rotating-replica-cache
+	// integration point that would let hot paths skip the per-request DB
+	// round-trip without giving up the shared PickBestReplica policy.
+	if distributed {
+		client, err := ml.backendLoader(opts...)
+		if err != nil {
+			return nil, err
+		}
+		if m := ml.CheckIsLoaded(o.modelID); m != nil && m.Process() == nil {
+			client = newConnectionEvictingClient(client, o.modelID, func() {
+				if err := ml.ShutdownModel(o.modelID); err != nil {
+					xlog.Warn("Failed to shut down remote model after connection error", "model", o.modelID, "error", err)
+				}
+			})
+		}
+		return client, nil
+	}
+
 	// Return earlier if we have a model already loaded
 	// (avoid looping through all the backends)
 	if m := ml.CheckIsLoaded(o.modelID); m != nil {
 		xlog.Debug("Model already loaded", "model", o.modelID)
 		// Update last used time for LRU tracking
 		ml.updateModelLastUsed(m)
-		return m.GRPC(o.parallelRequests, ml.wd), nil
+		client := m.GRPC(o.parallelRequests, ml.wd)
+		// Wrap remote models so connection errors during inference trigger eviction
+		if m.Process() == nil {
+			client = newConnectionEvictingClient(client, o.modelID, func() {
+				ml.ShutdownModel(o.modelID)
+			})
+		}
+		return client, nil
 	}
+
+	// Evict any loaded model that shares a concurrency group with the
+	// requested one before applying the global LRU cap — group eviction may
+	// already make room, and otherwise LRU might evict an unrelated model
+	// only for the group check to immediately evict another.
+	ml.enforceGroupExclusivity(o.modelID)
 
 	// Enforce LRU limit before loading a new model
 	ml.enforceLRULimit()
@@ -257,6 +337,12 @@ func (ml *ModelLoader) Load(opts ...Option) (grpc.Backend, error) {
 		client, err := ml.backendLoader(opts...)
 		if err != nil {
 			return nil, err
+		}
+		// Wrap remote models so connection errors during inference trigger eviction
+		if m := ml.CheckIsLoaded(o.modelID); m != nil && m.Process() == nil {
+			client = newConnectionEvictingClient(client, o.modelID, func() {
+				ml.ShutdownModel(o.modelID)
+			})
 		}
 		return client, nil
 	}
@@ -290,6 +376,12 @@ func (ml *ModelLoader) Load(opts ...Option) (grpc.Backend, error) {
 		model, modelerr := ml.backendLoader(options...)
 		if modelerr == nil && model != nil {
 			xlog.Info("Loads OK", "backend", key)
+			// Wrap remote models so connection errors during inference trigger eviction
+			if m := ml.CheckIsLoaded(o.modelID); m != nil && m.Process() == nil {
+				model = newConnectionEvictingClient(model, o.modelID, func() {
+					ml.ShutdownModel(o.modelID)
+				})
+			}
 			return model, nil
 		} else if modelerr != nil {
 			err = errors.Join(err, fmt.Errorf("[%s]: %w", key, modelerr))

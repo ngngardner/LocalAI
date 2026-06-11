@@ -15,6 +15,7 @@ import (
 )
 
 func SoundGeneration(
+	ctx context.Context,
 	text string,
 	duration *float32,
 	temperature *float32,
@@ -37,6 +38,7 @@ func SoundGeneration(
 	opts := ModelOptions(modelConfig, appConfig)
 	soundGenModel, err := loader.Load(opts...)
 	if err != nil {
+		recordModelLoadFailure(appConfig, modelConfig.Name, modelConfig.Backend, err, nil)
 		return "", nil, err
 	}
 
@@ -96,11 +98,11 @@ func SoundGeneration(
 
 	var startTime time.Time
 	if appConfig.EnableTracing {
-		trace.InitBackendTracingIfEnabled(appConfig.TracingMaxItems)
+		trace.InitBackendTracingIfEnabled(appConfig.TracingMaxItems, appConfig.TracingMaxBodyBytes)
 		startTime = time.Now()
 	}
 
-	res, err := soundGenModel.SoundGeneration(context.Background(), req)
+	res, err := soundGenModel.SoundGeneration(ctx, req)
 
 	if appConfig.EnableTracing {
 		errStr := ""

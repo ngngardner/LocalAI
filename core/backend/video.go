@@ -17,6 +17,7 @@ func VideoGeneration(height, width int32, prompt, negativePrompt, startImage, en
 		opts...,
 	)
 	if err != nil {
+		recordModelLoadFailure(appConfig, modelConfig.Name, modelConfig.Backend, err, nil)
 		return nil, err
 	}
 
@@ -41,7 +42,7 @@ func VideoGeneration(height, width int32, prompt, negativePrompt, startImage, en
 	}
 
 	if appConfig.EnableTracing {
-		trace.InitBackendTracingIfEnabled(appConfig.TracingMaxItems)
+		trace.InitBackendTracingIfEnabled(appConfig.TracingMaxItems, appConfig.TracingMaxBodyBytes)
 
 		traceData := map[string]any{
 			"prompt":          prompt,

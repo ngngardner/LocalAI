@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lithammer/fuzzysearch/fuzzy"
@@ -92,65 +94,106 @@ func (gm GalleryElements[T]) Search(term string) GalleryElements[T] {
 	return filteredModels
 }
 
-func (gm GalleryElements[T]) SortByName(sortOrder string) GalleryElements[T] {
-	sort.Slice(gm, func(i, j int) bool {
-		if sortOrder == "asc" {
-			return strings.ToLower(gm[i].GetName()) < strings.ToLower(gm[j].GetName())
-		} else {
-			return strings.ToLower(gm[i].GetName()) > strings.ToLower(gm[j].GetName())
+// FilterGalleryModelsByUsecase returns models whose known_usecases include all
+// the bits set in usecase. For example, passing FLAG_CHAT matches any model
+// with the chat usecase; passing FLAG_CHAT|FLAG_VISION matches only models
+// that have both.
+func FilterGalleryModelsByUsecase(models GalleryElements[*GalleryModel], usecase config.ModelConfigUsecase) GalleryElements[*GalleryModel] {
+	var filtered GalleryElements[*GalleryModel]
+	for _, m := range models {
+		u := m.GetKnownUsecases()
+		if u != nil && (*u&usecase) == usecase {
+			filtered = append(filtered, m)
 		}
+	}
+	return filtered
+}
+
+// FilterGalleryModelsByMultimodal returns models whose known_usecases span two
+// or more orthogonal modality groups (e.g. chat+vision, tts+transcript).
+func FilterGalleryModelsByMultimodal(models GalleryElements[*GalleryModel]) GalleryElements[*GalleryModel] {
+	var filtered GalleryElements[*GalleryModel]
+	for _, m := range models {
+		u := m.GetKnownUsecases()
+		if u != nil && config.IsMultimodal(*u) {
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered
+}
+
+func (gm GalleryElements[T]) FilterByTag(tag string) GalleryElements[T] {
+	var filtered GalleryElements[T]
+	for _, m := range gm {
+		for _, t := range m.GetTags() {
+			if strings.EqualFold(t, tag) {
+				filtered = append(filtered, m)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+func (gm GalleryElements[T]) SortByName(sortOrder string) GalleryElements[T] {
+	slices.SortFunc(gm, func(a, b T) int {
+		r := strings.Compare(strings.ToLower(a.GetName()), strings.ToLower(b.GetName()))
+		if sortOrder == "desc" {
+			return -r
+		}
+		return r
 	})
 	return gm
 }
 
 func (gm GalleryElements[T]) SortByRepository(sortOrder string) GalleryElements[T] {
-	sort.Slice(gm, func(i, j int) bool {
-		if sortOrder == "asc" {
-			return strings.ToLower(gm[i].GetGallery().Name) < strings.ToLower(gm[j].GetGallery().Name)
-		} else {
-			return strings.ToLower(gm[i].GetGallery().Name) > strings.ToLower(gm[j].GetGallery().Name)
+	slices.SortFunc(gm, func(a, b T) int {
+		r := strings.Compare(strings.ToLower(a.GetGallery().Name), strings.ToLower(b.GetGallery().Name))
+		if sortOrder == "desc" {
+			return -r
 		}
+		return r
 	})
 	return gm
 }
 
 func (gm GalleryElements[T]) SortByLicense(sortOrder string) GalleryElements[T] {
-	sort.Slice(gm, func(i, j int) bool {
-		licenseI := gm[i].GetLicense()
-		licenseJ := gm[j].GetLicense()
-		var result bool
-		if licenseI == "" && licenseJ != "" {
-			return sortOrder == "desc"
-		} else if licenseI != "" && licenseJ == "" {
-			return sortOrder == "asc"
-		} else if licenseI == "" && licenseJ == "" {
-			return false
+	slices.SortFunc(gm, func(a, b T) int {
+		licenseA := a.GetLicense()
+		licenseB := b.GetLicense()
+		var r int
+		if licenseA == "" && licenseB != "" {
+			r = 1
+		} else if licenseA != "" && licenseB == "" {
+			r = -1
 		} else {
-			result = strings.ToLower(licenseI) < strings.ToLower(licenseJ)
+			r = strings.Compare(strings.ToLower(licenseA), strings.ToLower(licenseB))
 		}
 		if sortOrder == "desc" {
-			return !result
-		} else {
-			return result
+			return -r
 		}
+		return r
 	})
 	return gm
 }
 
 func (gm GalleryElements[T]) SortByInstalled(sortOrder string) GalleryElements[T] {
-	sort.Slice(gm, func(i, j int) bool {
-		var result bool
+	slices.SortFunc(gm, func(a, b T) int {
+		var r int
 		// Sort by installed status: installed items first (true > false)
-		if gm[i].GetInstalled() != gm[j].GetInstalled() {
-			result = gm[i].GetInstalled()
+		if a.GetInstalled() != b.GetInstalled() {
+			if a.GetInstalled() {
+				r = -1
+			} else {
+				r = 1
+			}
 		} else {
-			result = strings.ToLower(gm[i].GetName()) < strings.ToLower(gm[j].GetName())
+			r = strings.Compare(strings.ToLower(a.GetName()), strings.ToLower(b.GetName()))
 		}
 		if sortOrder == "desc" {
-			return !result
-		} else {
-			return result
+			return -r
 		}
+		return r
 	})
 	return gm
 }
@@ -218,10 +261,111 @@ func AvailableGalleryModels(galleries []config.Gallery, systemState *system.Syst
 		if err != nil {
 			return nil, err
 		}
+
+		// Resolve model URLs locally (for local galleries) and collect unique
+		// URLs that need fetching for backend resolution.
+		uniqueURLs := map[string]struct{}{}
+		for _, m := range galleryModels {
+			if m.URL != "" {
+				m.URL = resolveModelURLLocally(m.URL, gallery.URL)
+			}
+			if m.Backend == "" && m.URL != "" {
+				uniqueURLs[m.URL] = struct{}{}
+			}
+		}
+
+		// Pre-warm cache with parallel fetches to avoid sequential HTTP
+		// requests on cold start (~50 unique gallery config files).
+		if len(uniqueURLs) > 0 {
+			urls := make([]string, 0, len(uniqueURLs))
+			for u := range uniqueURLs {
+				urls = append(urls, u)
+			}
+			prefetchModelConfigs(urls, systemState.Model.ModelsPath)
+		}
+
+		// Resolve backends from warm cache.
+		for _, m := range galleryModels {
+			if m.Backend == "" {
+				m.Backend = resolveBackend(m, systemState.Model.ModelsPath)
+			}
+		}
+
 		models = append(models, galleryModels...)
 	}
 
 	return models, nil
+}
+
+var (
+	availableModelsMu    sync.RWMutex
+	availableModelsCache GalleryElements[*GalleryModel]
+	refreshing           atomic.Bool
+	galleryGeneration    atomic.Uint64
+)
+
+// GalleryGeneration returns a counter that increments each time the gallery
+// model list is refreshed from upstream. VRAM estimation caches use this to
+// invalidate entries when the gallery data changes.
+func GalleryGeneration() uint64 { return galleryGeneration.Load() }
+
+// AvailableGalleryModelsCached returns gallery models from an in-memory cache.
+// Local-only fields (installed status) are refreshed on every call. A background
+// goroutine is triggered to re-fetch the full model list (including network
+// calls) so subsequent requests pick up changes without blocking the caller.
+// The first call with an empty cache blocks until the initial load completes.
+func AvailableGalleryModelsCached(galleries []config.Gallery, systemState *system.SystemState) (GalleryElements[*GalleryModel], error) {
+	availableModelsMu.RLock()
+	cached := availableModelsCache
+	availableModelsMu.RUnlock()
+
+	if cached != nil {
+		// Refresh installed status under write lock to avoid races with
+		// concurrent readers and the background refresh goroutine.
+		availableModelsMu.Lock()
+		for _, m := range cached {
+			_, err := os.Stat(filepath.Join(systemState.Model.ModelsPath, fmt.Sprintf("%s.yaml", m.GetName())))
+			m.SetInstalled(err == nil)
+		}
+		availableModelsMu.Unlock()
+		// Trigger a background refresh if one is not already running.
+		triggerGalleryRefresh(galleries, systemState)
+		return cached, nil
+	}
+
+	// No cache yet — must do a blocking load.
+	models, err := AvailableGalleryModels(galleries, systemState)
+	if err != nil {
+		return nil, err
+	}
+
+	availableModelsMu.Lock()
+	availableModelsCache = models
+	galleryGeneration.Add(1)
+	availableModelsMu.Unlock()
+
+	return models, nil
+}
+
+// triggerGalleryRefresh starts a background goroutine that refreshes the
+// gallery model cache. Only one refresh runs at a time; concurrent calls
+// are no-ops.
+func triggerGalleryRefresh(galleries []config.Gallery, systemState *system.SystemState) {
+	if !refreshing.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer refreshing.Store(false)
+		models, err := AvailableGalleryModels(galleries, systemState)
+		if err != nil {
+			xlog.Error("background gallery refresh failed", "error", err)
+			return
+		}
+		availableModelsMu.Lock()
+		availableModelsCache = models
+		galleryGeneration.Add(1)
+		availableModelsMu.Unlock()
+	}()
 }
 
 // List available backends

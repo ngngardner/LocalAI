@@ -27,7 +27,7 @@ var _ = Describe("Gallery", func() {
 
 	Describe("ReadConfigFile", func() {
 		It("should read and unmarshal a valid YAML file", func() {
-			testConfig := map[string]interface{}{
+			testConfig := map[string]any{
 				"name":        "test-model",
 				"description": "A test model",
 				"license":     "MIT",
@@ -39,8 +39,8 @@ var _ = Describe("Gallery", func() {
 			err = os.WriteFile(filePath, yamlData, 0644)
 			Expect(err).NotTo(HaveOccurred())
 
-			var result map[string]interface{}
-			config, err := ReadConfigFile[map[string]interface{}](filePath)
+			var result map[string]any
+			config, err := ReadConfigFile[map[string]any](filePath)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(config).NotTo(BeNil())
 			result = *config
@@ -50,7 +50,7 @@ var _ = Describe("Gallery", func() {
 		})
 
 		It("should return error when file does not exist", func() {
-			_, err := ReadConfigFile[map[string]interface{}]("nonexistent.yaml")
+			_, err := ReadConfigFile[map[string]any]("nonexistent.yaml")
 			Expect(err).To(HaveOccurred())
 		})
 
@@ -59,7 +59,7 @@ var _ = Describe("Gallery", func() {
 			err := os.WriteFile(filePath, []byte("invalid: yaml: content: [unclosed"), 0644)
 			Expect(err).NotTo(HaveOccurred())
 
-			_, err = ReadConfigFile[map[string]interface{}](filePath)
+			_, err = ReadConfigFile[map[string]any](filePath)
 			Expect(err).To(HaveOccurred())
 		})
 	})
@@ -156,6 +156,68 @@ var _ = Describe("Gallery", func() {
 			results := elements.Search("bert-emb")
 			Expect(results).To(HaveLen(1))
 			Expect(results[0].GetName()).To(Equal("bert-embeddings"))
+		})
+	})
+
+	Describe("GalleryElements FilterByTag", func() {
+		var elements GalleryElements[*GalleryModel]
+
+		BeforeEach(func() {
+			elements = GalleryElements[*GalleryModel]{
+				{
+					Metadata: Metadata{
+						Name: "whisper-asr",
+						Tags: []string{"asr", "stt"},
+					},
+				},
+				{
+					Metadata: Metadata{
+						Name: "image-diffusers",
+						Tags: []string{"sd", "image"},
+					},
+				},
+				{
+					Metadata: Metadata{
+						Name: "another-stt-model",
+						Tags: []string{"stt", "audio"},
+					},
+				},
+				{
+					Metadata: Metadata{
+						Name: "no-tags-model",
+						Tags: []string{},
+					},
+				},
+			}
+		})
+
+		It("should return exact tag matches only", func() {
+			results := elements.FilterByTag("asr")
+			Expect(results).To(HaveLen(1))
+			Expect(results[0].GetName()).To(Equal("whisper-asr"))
+		})
+
+		It("should not match substrings (image-diffusers must NOT match 'asr')", func() {
+			results := elements.FilterByTag("asr")
+			for _, r := range results {
+				Expect(r.GetName()).NotTo(Equal("image-diffusers"))
+			}
+		})
+
+		It("should be case insensitive", func() {
+			results := elements.FilterByTag("ASR")
+			Expect(results).To(HaveLen(1))
+			Expect(results[0].GetName()).To(Equal("whisper-asr"))
+		})
+
+		It("should return multiple models with the same tag", func() {
+			results := elements.FilterByTag("stt")
+			Expect(results).To(HaveLen(2))
+		})
+
+		It("should return empty when no models have the tag", func() {
+			results := elements.FilterByTag("nonexistent")
+			Expect(results).To(HaveLen(0))
 		})
 	})
 
@@ -490,33 +552,71 @@ var _ = Describe("Gallery", func() {
 			// Verify first model
 			Expect(models[0].Name).To(Equal("nanbeige4.1-3b-q8"))
 			Expect(models[0].Overrides).NotTo(BeNil())
-			Expect(models[0].Overrides["parameters"]).To(BeAssignableToTypeOf(map[string]interface{}{}))
-			params := models[0].Overrides["parameters"].(map[string]interface{})
+			Expect(models[0].Overrides["parameters"]).To(BeAssignableToTypeOf(map[string]any{}))
+			params := models[0].Overrides["parameters"].(map[string]any)
 			Expect(params["model"]).To(Equal("nanbeige4.1-3b-q8_0.gguf"))
 
 			// Verify second model (merged)
 			Expect(models[1].Name).To(Equal("nanbeige4.1-3b-q4"))
 			Expect(models[1].Overrides).NotTo(BeNil())
-			Expect(models[1].Overrides["parameters"]).To(BeAssignableToTypeOf(map[string]interface{}{}))
-			params = models[1].Overrides["parameters"].(map[string]interface{})
+			Expect(models[1].Overrides["parameters"]).To(BeAssignableToTypeOf(map[string]any{}))
+			params = models[1].Overrides["parameters"].(map[string]any)
 			Expect(params["model"]).To(Equal("nanbeige4.1-3b-q4_k_m.gguf"))
 
 			// Simulate the mergo.Merge call that was failing in models.go:251
 			// This should not panic with yaml.v3
-			configMap := make(map[string]interface{})
+			configMap := make(map[string]any)
 			configMap["name"] = "test"
 			configMap["backend"] = "llama-cpp"
-			configMap["parameters"] = map[string]interface{}{
+			configMap["parameters"] = map[string]any{
 				"model": "original.gguf",
 			}
 
 			err = mergo.Merge(&configMap, models[1].Overrides, mergo.WithOverride)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(configMap["parameters"]).NotTo(BeNil())
-			
+
 			// Verify the merge worked correctly
-			mergedParams := configMap["parameters"].(map[string]interface{})
+			mergedParams := configMap["parameters"].(map[string]any)
 			Expect(mergedParams["model"]).To(Equal("nanbeige4.1-3b-q4_k_m.gguf"))
+		})
+	})
+
+	Describe("GetKnownUsecases", func() {
+		It("uses explicit known_usecases from overrides when present", func() {
+			m := &GalleryModel{
+				Metadata: Metadata{Backend: "stablediffusion-ggml"},
+				Overrides: map[string]any{
+					"known_usecases": []any{"chat"},
+				},
+			}
+			u := m.GetKnownUsecases()
+			Expect(u).NotTo(BeNil())
+			// Override wins over the backend's image default.
+			Expect(*u & config.FLAG_CHAT).To(Equal(config.FLAG_CHAT))
+			Expect(*u & config.FLAG_IMAGE).To(Equal(config.ModelConfigUsecase(0)))
+		})
+
+		It("falls back to backend defaults when no override is set", func() {
+			m := &GalleryModel{Metadata: Metadata{Backend: "stablediffusion-ggml"}}
+			u := m.GetKnownUsecases()
+			Expect(u).NotTo(BeNil())
+			Expect(*u & config.FLAG_IMAGE).To(Equal(config.FLAG_IMAGE))
+		})
+
+		It("returns nil when neither overrides nor a known backend provide usecases", func() {
+			m := &GalleryModel{}
+			Expect(m.GetKnownUsecases()).To(BeNil())
+		})
+
+		It("filters models without explicit known_usecases via backend defaults", func() {
+			models := GalleryElements[*GalleryModel]{
+				&GalleryModel{Metadata: Metadata{Name: "sd-model", Backend: "stablediffusion-ggml"}},
+				&GalleryModel{Metadata: Metadata{Name: "whisper-model", Backend: "whisper"}},
+			}
+			filtered := FilterGalleryModelsByUsecase(models, config.FLAG_IMAGE)
+			Expect(filtered).To(HaveLen(1))
+			Expect(filtered[0].Name).To(Equal("sd-model"))
 		})
 	})
 })

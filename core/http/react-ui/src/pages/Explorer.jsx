@@ -7,7 +7,7 @@ export default function Explorer() {
   return (
     <div style={{ minHeight: '100vh', background: 'var(--color-bg-primary)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 'var(--spacing-xl)' }}>
       <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: 'var(--spacing-md)' }}>
-        <span className="text-gradient">LocalAI Explorer</span>
+        <span style={{ color: 'var(--color-primary)' }}>LocalAI Explorer</span>
       </h1>
       <p style={{ color: 'var(--color-text-secondary)', marginBottom: 'var(--spacing-xl)', textAlign: 'center' }}>
         Network visualization and node explorer
@@ -18,7 +18,7 @@ export default function Explorer() {
           <p>Explorer visualization</p>
         </div>
       </div>
-      <button className="btn btn-secondary" onClick={() => navigate('/')} style={{ marginTop: 'var(--spacing-lg)' }}>
+      <button className="btn btn-secondary" onClick={() => navigate('/app')} style={{ marginTop: 'var(--spacing-lg)' }}>
         <i className="fas fa-arrow-left" /> Back to Home
       </button>
     </div>

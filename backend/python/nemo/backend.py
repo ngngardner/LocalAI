@@ -14,6 +14,10 @@ import torch
 import nemo.collections.asr as nemo_asr
 
 import grpc
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'common'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'common'))
+from grpc_auth import get_auth_interceptors
+
 
 
 def is_float(s):
@@ -95,8 +99,15 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             if not results or len(results) == 0:
                 return backend_pb2.TranscriptResult(segments=[], text="")
 
-            # Get the transcript text from the first result
-            text = results[0]
+            # Get the transcript text from the first result.
+            # CTC models return List[str], TDT/RNNT models return List[Hypothesis]
+            # where the actual text lives in Hypothesis.text.
+            result = results[0]
+            if isinstance(result, str):
+                text = result
+            else:
+                text = getattr(result, 'text', None) or ""
+
             if text:
                 # Create a single segment with the full transcription
                 result_segments.append(backend_pb2.TranscriptSegment(
@@ -119,7 +130,9 @@ def serve(address):
             ('grpc.max_message_length', 50 * 1024 * 1024),
             ('grpc.max_send_message_length', 50 * 1024 * 1024),
             ('grpc.max_receive_message_length', 50 * 1024 * 1024),
-        ])
+        ],
+        interceptors=get_auth_interceptors(),
+    )
     backend_pb2_grpc.add_BackendServicer_to_server(BackendServicer(), server)
     server.add_insecure_port(address)
     server.start()

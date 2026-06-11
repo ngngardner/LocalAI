@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useParams, useNavigate, useOutletContext } from 'react-router-dom'
+import { useParams, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom'
 import { agentsApi } from '../utils/api'
+import { apiUrl } from '../utils/basePath'
 
 function ObservableSummary({ observable }) {
   const creation = observable?.creation || {}
@@ -186,26 +187,28 @@ export default function AgentStatus() {
   const { name } = useParams()
   const navigate = useNavigate()
   const { addToast } = useOutletContext()
+  const [searchParams] = useSearchParams()
+  const userId = searchParams.get('user_id') || undefined
   const [observables, setObservables] = useState([])
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
 
   const fetchData = useCallback(async () => {
     try {
-      const obsData = await agentsApi.observables(name)
+      const obsData = await agentsApi.observables(name, userId)
       const history = Array.isArray(obsData) ? obsData : (obsData?.History || [])
       setObservables(history)
     } catch (err) {
       addToast(`Failed to load observables: ${err.message}`, 'error')
     }
     try {
-      const statusData = await agentsApi.status(name)
+      const statusData = await agentsApi.status(name, userId)
       setStatus(statusData)
     } catch (_) {
       // status endpoint may fail if no actions have run yet
     }
     setLoading(false)
-  }, [name, addToast])
+  }, [name, userId, addToast])
 
   useEffect(() => {
     fetchData()
@@ -215,7 +218,7 @@ export default function AgentStatus() {
 
   // SSE for real-time observable updates
   useEffect(() => {
-    const url = `/api/agents/${encodeURIComponent(name)}/sse`
+    const url = apiUrl(agentsApi.sseUrl(name, userId))
     const es = new EventSource(url)
 
     es.addEventListener('observable_update', (e) => {
@@ -242,11 +245,11 @@ export default function AgentStatus() {
 
     es.onerror = () => { /* reconnect handled by browser */ }
     return () => es.close()
-  }, [name])
+  }, [name, userId])
 
   const handleClear = async () => {
     try {
-      await agentsApi.clearObservables(name)
+      await agentsApi.clearObservables(name, userId)
       setObservables([])
       addToast('Observables cleared', 'success')
     } catch (err) {
@@ -257,7 +260,7 @@ export default function AgentStatus() {
   const tree = buildTree(observables)
 
   return (
-    <div className="page">
+    <div className="page page--wide">
       <style>{`
         .as-card {
           background: var(--color-bg-secondary);
@@ -291,7 +294,7 @@ export default function AgentStatus() {
         .as-id {
           font-size: 0.6875rem;
           color: var(--color-text-muted);
-          font-family: 'JetBrains Mono', monospace;
+          font-family: var(--font-mono);
         }
         .as-summary-item {
           display: flex; align-items: center; gap: 6px;
@@ -300,7 +303,7 @@ export default function AgentStatus() {
         }
         .as-summary-item i { font-size: 0.625rem; flex-shrink: 0; }
         .as-summary-creation i { color: var(--color-primary); }
-        .as-summary-tool-call i { color: #f59e0b; }
+        .as-summary-tool-call i { color: var(--color-warning); }
         .as-summary-completion i { color: var(--color-success); }
         .as-summary-error i { color: var(--color-error); }
         .as-card-body {
@@ -324,13 +327,13 @@ export default function AgentStatus() {
           background: var(--color-bg-tertiary); color: var(--color-text-muted);
           margin-right: 4px; vertical-align: middle;
         }
-        .as-tag-error { background: var(--color-error); color: #fff; }
+        .as-tag-error { background: var(--color-error); color: var(--color-text-inverse); }
         .as-error-text { color: var(--color-error); }
         .as-raw { margin-top: var(--spacing-sm); }
         .as-raw summary { font-size: 0.75rem; color: var(--color-text-muted); cursor: pointer; }
         .as-json {
           background: var(--color-bg-tertiary); border-radius: var(--radius-sm);
-          padding: var(--spacing-sm); font-family: 'JetBrains Mono', monospace;
+          padding: var(--spacing-sm); font-family: var(--font-mono);
           font-size: 0.75rem; overflow-x: auto; white-space: pre-wrap;
           word-break: break-word; max-height: 300px; overflow-y: auto;
         }
@@ -358,10 +361,10 @@ export default function AgentStatus() {
           <p className="page-subtitle">Agent observables and activity history</p>
         </div>
         <div style={{ display: 'flex', gap: 'var(--spacing-sm)' }}>
-          <button className="btn btn-secondary" onClick={() => navigate(`/agents/${encodeURIComponent(name)}/chat`)}>
+          <button className="btn btn-secondary" onClick={() => navigate(`/app/agents/${encodeURIComponent(name)}/chat${userId ? `?user_id=${encodeURIComponent(userId)}` : ''}`)}>
             <i className="fas fa-comment" /> Chat
           </button>
-          <button className="btn btn-secondary" onClick={() => navigate(`/agents/${encodeURIComponent(name)}/edit`)}>
+          <button className="btn btn-secondary" onClick={() => navigate(`/app/agents/${encodeURIComponent(name)}/edit${userId ? `?user_id=${encodeURIComponent(userId)}` : ''}`)}>
             <i className="fas fa-edit" /> Edit
           </button>
           <button className="btn btn-secondary" onClick={fetchData}>
@@ -404,7 +407,7 @@ export default function AgentStatus() {
           <div className="empty-state-icon"><i className="fas fa-chart-bar" /></div>
           <h2 className="empty-state-title">No observables yet</h2>
           <p className="empty-state-text">Send a message to the agent to see its activity here.</p>
-          <button className="btn btn-primary" onClick={() => navigate(`/agents/${encodeURIComponent(name)}/chat`)}>
+          <button className="btn btn-primary" onClick={() => navigate(`/app/agents/${encodeURIComponent(name)}/chat${userId ? `?user_id=${encodeURIComponent(userId)}` : ''}`)}>
             <i className="fas fa-comment" /> Chat with {name}
           </button>
         </div>

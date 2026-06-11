@@ -4,8 +4,8 @@ import (
 	"time"
 
 	"github.com/mudler/LocalAI/core/config"
-	"github.com/mudler/LocalAI/core/trace"
 	"github.com/mudler/LocalAI/core/schema"
+	"github.com/mudler/LocalAI/core/trace"
 	"github.com/mudler/LocalAI/pkg/grpc"
 	"github.com/mudler/LocalAI/pkg/model"
 )
@@ -18,6 +18,7 @@ func ModelTokenize(s string, loader *model.ModelLoader, modelConfig config.Model
 	opts := ModelOptions(modelConfig, appConfig)
 	inferenceModel, err = loader.Load(opts...)
 	if err != nil {
+		recordModelLoadFailure(appConfig, modelConfig.Name, modelConfig.Backend, err, nil)
 		return schema.TokenizeResponse{}, err
 	}
 
@@ -26,7 +27,7 @@ func ModelTokenize(s string, loader *model.ModelLoader, modelConfig config.Model
 
 	var startTime time.Time
 	if appConfig.EnableTracing {
-		trace.InitBackendTracingIfEnabled(appConfig.TracingMaxItems)
+		trace.InitBackendTracingIfEnabled(appConfig.TracingMaxItems, appConfig.TracingMaxBodyBytes)
 		startTime = time.Now()
 	}
 

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"regexp"
 	"strings"
 	"unicode"
@@ -63,7 +63,7 @@ func NewChatMsgParser(input string, isPartial bool) *ChatMsgParser {
 // generateHealingMarker generates a unique marker that doesn't appear in the input
 func generateHealingMarker(input string) string {
 	for {
-		id := fmt.Sprintf("%d", rand.Int63())
+		id := fmt.Sprintf("%d", rand.Int64())
 		if !strings.Contains(input, id) {
 			return id
 		}
@@ -577,6 +577,21 @@ func trimPotentialPartialWord(content string, format *XMLToolCallFormat, startTh
 func removeHealingMarkerFromJSON(value map[string]any, marker string) map[string]any {
 	result := make(map[string]any)
 	for k, v := range value {
+		// Strip the healing marker from KEYS. parseJSONWithStack appends the
+		// marker to close a partial key (e.g. `{ "code` heals into
+		// `{"code<marker>":1}`); we want to preserve the prefix the model
+		// actually emitted. If the entire key was the marker (i.e. the input
+		// was just `{` heals into `{"<marker>":1}`), the truncated key is
+		// empty — drop the entry. Without this, downstream callers see a
+		// stub object with a random integer-looking key and treat it as a
+		// complete result, the shape that trips chat_stream_workers.go's
+		// streaming tool-call detector in issue #9988.
+		if idx := strings.Index(k, marker); idx != -1 {
+			k = k[:idx]
+			if k == "" {
+				continue
+			}
+		}
 		if str, ok := v.(string); ok {
 			if idx := strings.Index(str, marker); idx != -1 {
 				v = str[:idx]
@@ -621,24 +636,38 @@ func (p *ChatMsgParser) TryConsumeXMLToolCalls(format *XMLToolCallFormat) (bool,
 	// Handle Functionary format (JSON parameters inside XML tags) - use regex parser
 	if format.KeyStart == "" && format.ToolStart == "<function=" {
 		// Fall back to regex-based parser for Functionary format
-		results, err := parseFunctionaryFormat(p.input[p.pos:], format)
+		sub := p.input[p.pos:]
+		results, err := parseFunctionaryFormat(sub, format)
 		if err != nil || len(results) == 0 {
 			return false, nil
 		}
 		for _, result := range results {
 			p.AddToolCall(result.Name, "", result.Arguments)
+		}
+		// Advance position past the last tool call end tag
+		if last := strings.LastIndex(sub, format.ToolEnd); last >= 0 {
+			p.pos += last + len(format.ToolEnd)
 		}
 		return true, nil
 	}
 
 	// Handle JSON-like formats (Apriel-1.5, Xiaomi-MiMo) - use regex parser
 	if format.ToolStart != "" && strings.Contains(format.ToolStart, "{\"name\"") {
-		results, err := parseJSONLikeXMLFormat(p.input[p.pos:], format)
+		sub := p.input[p.pos:]
+		results, err := parseJSONLikeXMLFormat(sub, format)
 		if err != nil || len(results) == 0 {
 			return false, nil
 		}
 		for _, result := range results {
 			p.AddToolCall(result.Name, "", result.Arguments)
+		}
+		// Advance position past the last scope/tool end tag
+		endTag := format.ScopeEnd
+		if endTag == "" {
+			endTag = format.ToolEnd
+		}
+		if last := strings.LastIndex(sub, endTag); last >= 0 {
+			p.pos += last + len(endTag)
 		}
 		return true, nil
 	}

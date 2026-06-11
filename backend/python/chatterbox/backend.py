@@ -18,6 +18,10 @@ import tempfile
 import backend_pb2
 import backend_pb2_grpc
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'common'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'common'))
+from grpc_auth import get_auth_interceptors
+
 # torch, torchaudio, chatterbox are imported lazily in LoadModel
 # so that CUDA_VISIBLE_DEVICES can be set first from model config options.
 torch = None
@@ -54,6 +58,21 @@ def parse_options(raw_options):
             value = value.lower() == "true"
         options[key] = value
     return options
+
+
+def coerce_param_value(value):
+    """Coerce a TTSRequest.params value (string on the wire) to the type the
+    Chatterbox generate() kwargs expect (float/int/bool), matching how static
+    YAML options are coerced at load time. Non-string values pass through."""
+    if not isinstance(value, str):
+        return value
+    if is_float(value):
+        return float(value)
+    if is_int(value):
+        return int(value)
+    if value.lower() in ["true", "false"]:
+        return value.lower() == "true"
+    return value
 
 
 def split_text_at_word_boundary(text, max_length=250):
@@ -175,6 +194,14 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 kwargs["audio_prompt_path"] = self.AudioPath
             kwargs.update(self.options)
 
+            # Merge per-request params (TTSRequest.params), overriding the static
+            # YAML options. This exposes Chatterbox generation knobs (e.g.
+            # exaggeration, cfg_weight, temperature) per request. Values arrive as
+            # strings on the wire and are coerced to float/int/bool.
+            if hasattr(request, "params") and request.params:
+                for key, value in request.params.items():
+                    kwargs[key] = coerce_param_value(value)
+
             if len(request.text) > 250:
                 text_chunks = split_text_at_word_boundary(request.text, max_length=250)
                 print(f"Splitting text into {len(text_chunks)} chunks", file=sys.stderr)
@@ -201,7 +228,9 @@ def serve(address):
             ('grpc.max_message_length', 50 * 1024 * 1024),
             ('grpc.max_send_message_length', 50 * 1024 * 1024),
             ('grpc.max_receive_message_length', 50 * 1024 * 1024),
-        ])
+        ],
+        interceptors=get_auth_interceptors(),
+    )
     backend_pb2_grpc.add_BackendServicer_to_server(BackendServicer(), server)
     server.add_insecure_port(address)
     server.start()

@@ -117,13 +117,13 @@ var _ = Describe("Gallery Backends", func() {
 
 	Describe("InstallBackendFromGallery", func() {
 		It("should return error when backend is not found", func() {
-			err := InstallBackendFromGallery(context.TODO(), galleries, systemState, ml, "non-existent", nil, true)
+			err := InstallBackendFromGallery(context.TODO(), galleries, systemState, ml, "non-existent", nil, true, false)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("no backend found with name \"non-existent\""))
 		})
 
 		It("should install backend from gallery", func() {
-			err := InstallBackendFromGallery(context.TODO(), galleries, systemState, ml, "test-backend", nil, true)
+			err := InstallBackendFromGallery(context.TODO(), galleries, systemState, ml, "test-backend", nil, true, false)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(filepath.Join(tempDir, "test-backend", "run.sh")).To(BeARegularFile())
 		})
@@ -545,7 +545,7 @@ var _ = Describe("Gallery Backends", func() {
 				VRAM:      1000000000000,
 				Backend:   system.Backend{BackendsPath: tempDir},
 			}
-			err = InstallBackendFromGallery(context.TODO(), []config.Gallery{gallery}, nvidiaSystemState, ml, "meta-backend", nil, true)
+			err = InstallBackendFromGallery(context.TODO(), []config.Gallery{gallery}, nvidiaSystemState, ml, "meta-backend", nil, true, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			metaBackendPath := filepath.Join(tempDir, "meta-backend")
@@ -625,7 +625,7 @@ var _ = Describe("Gallery Backends", func() {
 				VRAM:      1000000000000,
 				Backend:   system.Backend{BackendsPath: tempDir},
 			}
-			err = InstallBackendFromGallery(context.TODO(), []config.Gallery{gallery}, nvidiaSystemState, ml, "meta-backend", nil, true)
+			err = InstallBackendFromGallery(context.TODO(), []config.Gallery{gallery}, nvidiaSystemState, ml, "meta-backend", nil, true, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			metaBackendPath := filepath.Join(tempDir, "meta-backend")
@@ -709,7 +709,7 @@ var _ = Describe("Gallery Backends", func() {
 				VRAM:      1000000000000,
 				Backend:   system.Backend{BackendsPath: tempDir},
 			}
-			err = InstallBackendFromGallery(context.TODO(), []config.Gallery{gallery}, nvidiaSystemState, ml, "meta-backend", nil, true)
+			err = InstallBackendFromGallery(context.TODO(), []config.Gallery{gallery}, nvidiaSystemState, ml, "meta-backend", nil, true, false)
 			Expect(err).NotTo(HaveOccurred())
 
 			metaBackendPath := filepath.Join(tempDir, "meta-backend")
@@ -808,7 +808,7 @@ var _ = Describe("Gallery Backends", func() {
 				system.WithBackendPath(newPath),
 			)
 			Expect(err).NotTo(HaveOccurred())
-			err = InstallBackend(context.TODO(), systemState, ml, &backend, nil)
+			err = InstallBackend(context.TODO(), systemState, ml, &backend, nil, false)
 			Expect(newPath).To(BeADirectory())
 			Expect(err).To(HaveOccurred()) // Will fail due to invalid URI, but path should be created
 		})
@@ -840,7 +840,7 @@ var _ = Describe("Gallery Backends", func() {
 				system.WithBackendPath(tempDir),
 			)
 			Expect(err).NotTo(HaveOccurred())
-			err = InstallBackend(context.TODO(), systemState, ml, &backend, nil)
+			err = InstallBackend(context.TODO(), systemState, ml, &backend, nil, false)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(filepath.Join(tempDir, "test-backend", "metadata.json")).To(BeARegularFile())
 			dat, err := os.ReadFile(filepath.Join(tempDir, "test-backend", "metadata.json"))
@@ -873,7 +873,7 @@ var _ = Describe("Gallery Backends", func() {
 
 			Expect(filepath.Join(tempDir, "test-backend", "metadata.json")).ToNot(BeARegularFile())
 
-			err = InstallBackend(context.TODO(), systemState, ml, &backend, nil)
+			err = InstallBackend(context.TODO(), systemState, ml, &backend, nil, false)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(filepath.Join(tempDir, "test-backend", "metadata.json")).To(BeARegularFile())
 		})
@@ -894,7 +894,7 @@ var _ = Describe("Gallery Backends", func() {
 				system.WithBackendPath(tempDir),
 			)
 			Expect(err).NotTo(HaveOccurred())
-			err = InstallBackend(context.TODO(), systemState, ml, &backend, nil)
+			err = InstallBackend(context.TODO(), systemState, ml, &backend, nil, false)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(filepath.Join(tempDir, "test-backend", "metadata.json")).To(BeARegularFile())
 
@@ -951,6 +951,58 @@ var _ = Describe("Gallery Backends", func() {
 			Expect(err).NotTo(HaveOccurred())
 			err = DeleteBackendFromSystem(systemState, "non-existent")
 			Expect(err).To(HaveOccurred())
+		})
+
+		It("removes an orphaned meta backend whose concrete is missing", func() {
+			// Real scenario from the dev cluster: the concrete got wiped
+			// (partial install, manual cleanup, previous crash) but the meta
+			// directory + metadata.json still points at it. The old code
+			// errored with "meta backend X not found" and left the orphan in
+			// place, making the backend impossible to uninstall.
+			metaName := "meta-backend"
+			concreteName := "concrete-backend-that-vanished"
+			metaPath := filepath.Join(tempDir, metaName)
+			Expect(os.MkdirAll(metaPath, 0750)).To(Succeed())
+
+			meta := BackendMetadata{Name: metaName, MetaBackendFor: concreteName}
+			data, err := json.MarshalIndent(meta, "", "  ")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.WriteFile(filepath.Join(metaPath, "metadata.json"), data, 0644)).To(Succeed())
+
+			// Concrete directory intentionally absent.
+			systemState, err := system.GetSystemState(system.WithBackendPath(tempDir))
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(DeleteBackendFromSystem(systemState, metaName)).To(Succeed())
+			Expect(metaPath).NotTo(BeADirectory())
+		})
+	})
+
+	Describe("InstallBackendFromGallery — orphaned meta reinstall", func() {
+		It("re-runs install when the meta's concrete is missing", func() {
+			// Seed state: meta dir exists with metadata pointing at a
+			// concrete that was removed from disk. ListSystemBackends still
+			// surfaces the meta via its metadata.Name → the old short-circuit
+			// at `if backends.Exists(name) { return nil }` returned silently,
+			// leaving the worker's findBackend() with a dead alias forever.
+			// The fix: require the backend to be runnable before we skip.
+			metaName := "meta-orphan"
+			concreteName := "concrete-gone"
+			metaPath := filepath.Join(tempDir, metaName)
+			Expect(os.MkdirAll(metaPath, 0750)).To(Succeed())
+			meta := BackendMetadata{Name: metaName, MetaBackendFor: concreteName}
+			data, err := json.MarshalIndent(meta, "", "  ")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.WriteFile(filepath.Join(metaPath, "metadata.json"), data, 0644)).To(Succeed())
+
+			systemState, err := system.GetSystemState(system.WithBackendPath(tempDir))
+			Expect(err).NotTo(HaveOccurred())
+
+			listed, err := ListSystemBackends(systemState)
+			Expect(err).NotTo(HaveOccurred())
+			b, ok := listed.Get(metaName)
+			Expect(ok).To(BeTrue())
+			Expect(isBackendRunnable(b)).To(BeFalse()) // concrete run.sh absent
 		})
 	})
 

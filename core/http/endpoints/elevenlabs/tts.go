@@ -15,6 +15,7 @@ import (
 
 // TTSEndpoint is the OpenAI Speech API endpoint https://platform.openai.com/docs/api-reference/audio/createSpeech
 // @Summary Generates audio from the input text.
+// @Tags audio
 // @Param  voice-id	path string	true	"Account ID"
 // @Param request body schema.TTSRequest true "query params"
 // @Success 200 {string} binary	 "Response"
@@ -36,7 +37,7 @@ func TTSEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, appConfig 
 
 		xlog.Debug("elevenlabs TTS request received", "modelName", input.ModelID)
 
-		filePath, _, err := backend.ModelTTS(input.Text, voiceID, input.LanguageCode, ml, appConfig, *cfg)
+		filePath, _, err := backend.ModelTTS(c.Request().Context(), input.Text, voiceID, input.LanguageCode, "", nil, ml, appConfig, *cfg)
 		if err != nil {
 			return err
 		}

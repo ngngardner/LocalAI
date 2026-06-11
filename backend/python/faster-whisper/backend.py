@@ -14,6 +14,10 @@ import torch
 from faster_whisper import WhisperModel
 
 import grpc
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'common'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'common'))
+from grpc_auth import get_auth_interceptors
+
 
 
 _ONE_DAY_IN_SECONDS = 60 * 60 * 24
@@ -51,31 +55,26 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
         resultSegments = []
         text = ""
         try:
-            word_timestamps = getattr(request, 'word_timestamps', False)
-            segments, info = self.model.transcribe(
-                request.dst,
-                beam_size=5,
-                condition_on_previous_text=False,
-                word_timestamps=word_timestamps,
-            )
+            word_timestamps = "word" in request.timestamp_granularities
+            segments, info = self.model.transcribe(request.dst, beam_size=5, condition_on_previous_text=False, word_timestamps=word_timestamps)
             id = 0
             for segment in segments:
                 print("[%.2fs -> %.2fs] %s" % (segment.start, segment.end, segment.text))
                 words = []
-                if word_timestamps and segment.words:
-                    for w in segment.words:
+                if word_timestamps and hasattr(segment, 'words'):
+                    for word in segment.words:
                         words.append(backend_pb2.TranscriptWord(
-                            start=int(w.start * 1e9),
-                            end=int(w.end * 1e9),
-                            word=w.word,
-                            probability=w.probability,
+                            start=int(word.start * 1e9),
+                            end=int(word.end * 1e9),
+                            text=word.word
                         ))
+
                 resultSegments.append(backend_pb2.TranscriptSegment(
                     id=id,
                     start=int(segment.start * 1e9),
                     end=int(segment.end * 1e9),
                     text=segment.text,
-                    words=words,
+                    words=words
                 ))
                 text += segment.text
                 id += 1
@@ -91,7 +90,9 @@ def serve(address):
             ('grpc.max_message_length', 50 * 1024 * 1024),  # 50MB
             ('grpc.max_send_message_length', 50 * 1024 * 1024),  # 50MB
             ('grpc.max_receive_message_length', 50 * 1024 * 1024),  # 50MB
-        ])
+        ],
+        interceptors=get_auth_interceptors(),
+    )
     backend_pb2_grpc.add_BackendServicer_to_server(BackendServicer(), server)
     server.add_insecure_port(address)
     server.start()

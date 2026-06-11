@@ -320,7 +320,7 @@ var _ = Describe("WatchDog", func() {
 		})
 
 		It("should handle rapid model switches", func() {
-			for i := 0; i < 5; i++ {
+			for range 5 {
 				wd.AddAddressModelMap("addr", "model")
 				wd.Mark("addr")
 				wd.UnMark("addr") // Unmark to make it idle
@@ -555,6 +555,290 @@ var _ = Describe("WatchDog", func() {
 			result := wd.EnforceLRULimit(0)
 			Expect(result.EvictedCount).To(Equal(2))
 			Expect(result.NeedMore).To(BeFalse()) // We evicted enough (2 models)
+		})
+	})
+
+	Context("Pinned Models", func() {
+		It("should set and get pinned models", func() {
+			wd = model.NewWatchDog(
+				model.WithProcessManager(pm),
+			)
+			Expect(wd.IsModelPinned("model1")).To(BeFalse())
+
+			wd.SetPinnedModels([]string{"model1", "model2"})
+			Expect(wd.IsModelPinned("model1")).To(BeTrue())
+			Expect(wd.IsModelPinned("model2")).To(BeTrue())
+			Expect(wd.IsModelPinned("model3")).To(BeFalse())
+		})
+
+		It("should replace pinned models on subsequent calls", func() {
+			wd = model.NewWatchDog(
+				model.WithProcessManager(pm),
+			)
+			wd.SetPinnedModels([]string{"model1"})
+			Expect(wd.IsModelPinned("model1")).To(BeTrue())
+
+			wd.SetPinnedModels([]string{"model2"})
+			Expect(wd.IsModelPinned("model1")).To(BeFalse())
+			Expect(wd.IsModelPinned("model2")).To(BeTrue())
+		})
+
+		It("should skip pinned models during LRU eviction", func() {
+			wd = model.NewWatchDog(
+				model.WithProcessManager(pm),
+				model.WithLRULimit(2),
+				model.WithForceEvictionWhenBusy(true),
+			)
+
+			// Add two models, pin the older one
+			wd.AddAddressModelMap("addr1", "model1")
+			wd.Mark("addr1")
+			wd.UnMark("addr1")
+			time.Sleep(10 * time.Millisecond)
+
+			wd.AddAddressModelMap("addr2", "model2")
+			wd.Mark("addr2")
+			wd.UnMark("addr2")
+
+			wd.SetPinnedModels([]string{"model1"})
+
+			// Enforce LRU - model1 is oldest but pinned, model2 should be evicted
+			result := wd.EnforceLRULimit(0)
+			Expect(result.EvictedCount).To(Equal(1))
+			Expect(pm.getShutdownCalls()).To(ContainElement("model2"))
+			Expect(pm.getShutdownCalls()).ToNot(ContainElement("model1"))
+		})
+
+		It("should not evict any model when all are pinned and LRU limit reached", func() {
+			wd = model.NewWatchDog(
+				model.WithProcessManager(pm),
+				model.WithLRULimit(1),
+				model.WithForceEvictionWhenBusy(true),
+			)
+
+			wd.AddAddressModelMap("addr1", "model1")
+			wd.Mark("addr1")
+			wd.UnMark("addr1")
+			time.Sleep(10 * time.Millisecond)
+
+			wd.AddAddressModelMap("addr2", "model2")
+			wd.Mark("addr2")
+			wd.UnMark("addr2")
+
+			wd.SetPinnedModels([]string{"model1", "model2"})
+
+			result := wd.EnforceLRULimit(0)
+			Expect(result.EvictedCount).To(Equal(0))
+			Expect(pm.getShutdownCalls()).To(BeEmpty())
+		})
+
+		It("should skip pinned models during idle check", func() {
+			wd = model.NewWatchDog(
+				model.WithProcessManager(pm),
+				model.WithIdleTimeout(10*time.Millisecond),
+				model.WithIdleCheck(true),
+				model.WithWatchdogInterval(50*time.Millisecond),
+			)
+
+			// Add two models and make them idle
+			wd.AddAddressModelMap("addr1", "model1")
+			wd.Mark("addr1")
+			wd.UnMark("addr1")
+
+			wd.AddAddressModelMap("addr2", "model2")
+			wd.Mark("addr2")
+			wd.UnMark("addr2")
+
+			// Pin model1
+			wd.SetPinnedModels([]string{"model1"})
+
+			// Start watchdog and wait for idle check
+			go wd.Run()
+			defer wd.Shutdown()
+
+			// Wait for the idle timeout + watchdog interval to pass
+			time.Sleep(200 * time.Millisecond)
+
+			// Only model2 should be shut down
+			shutdowns := pm.getShutdownCalls()
+			Expect(shutdowns).To(ContainElement("model2"))
+			Expect(shutdowns).ToNot(ContainElement("model1"))
+		})
+	})
+
+	Context("Concurrency Groups", func() {
+		Describe("ReplaceModelGroups / GetModelGroups", func() {
+			It("returns nil for unknown models", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				Expect(wd.GetModelGroups("nope")).To(BeNil())
+			})
+
+			It("stores and retrieves groups", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.ReplaceModelGroups(map[string][]string{
+					"a": {"heavy", "vision"},
+					"b": {"heavy"},
+				})
+				Expect(wd.GetModelGroups("a")).To(Equal([]string{"heavy", "vision"}))
+				Expect(wd.GetModelGroups("b")).To(Equal([]string{"heavy"}))
+				Expect(wd.GetModelGroups("c")).To(BeNil())
+			})
+
+			It("replaces previous state on subsequent calls", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.ReplaceModelGroups(map[string][]string{"a": {"heavy"}})
+				wd.ReplaceModelGroups(map[string][]string{"b": {"vision"}})
+				Expect(wd.GetModelGroups("a")).To(BeNil())
+				Expect(wd.GetModelGroups("b")).To(Equal([]string{"vision"}))
+			})
+
+			It("clears state when called with an empty map", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.ReplaceModelGroups(map[string][]string{"a": {"heavy"}})
+				wd.ReplaceModelGroups(nil)
+				Expect(wd.GetModelGroups("a")).To(BeNil())
+			})
+
+			It("returns a defensive copy", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.ReplaceModelGroups(map[string][]string{"a": {"heavy"}})
+				got := wd.GetModelGroups("a")
+				got[0] = "tampered"
+				Expect(wd.GetModelGroups("a")).To(Equal([]string{"heavy"}))
+			})
+		})
+
+		Describe("EnforceGroupExclusivity", func() {
+			It("is a no-op when the requested model has no groups", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.AddAddressModelMap("addr1", "model1")
+				wd.AddAddressModelMap("addr2", "model2")
+
+				result := wd.EnforceGroupExclusivity("requested")
+				Expect(result.EvictedCount).To(Equal(0))
+				Expect(result.NeedMore).To(BeFalse())
+				Expect(pm.getShutdownCalls()).To(BeEmpty())
+			})
+
+			It("is a no-op when no loaded model shares a group", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.ReplaceModelGroups(map[string][]string{
+					"loaded":    {"vision"},
+					"requested": {"heavy"},
+				})
+				wd.AddAddressModelMap("addr1", "loaded")
+
+				result := wd.EnforceGroupExclusivity("requested")
+				Expect(result.EvictedCount).To(Equal(0))
+				Expect(result.NeedMore).To(BeFalse())
+				Expect(pm.getShutdownCalls()).To(BeEmpty())
+			})
+
+			It("evicts a loaded model that shares a single group", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.ReplaceModelGroups(map[string][]string{
+					"a": {"heavy"},
+					"b": {"heavy"},
+				})
+				wd.AddAddressModelMap("addrA", "a")
+				wd.Mark("addrA")
+				wd.UnMark("addrA")
+
+				result := wd.EnforceGroupExclusivity("b")
+				Expect(result.EvictedCount).To(Equal(1))
+				Expect(result.NeedMore).To(BeFalse())
+				Expect(pm.getShutdownCalls()).To(ConsistOf("a"))
+			})
+
+			It("evicts when groups overlap on any single name", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.ReplaceModelGroups(map[string][]string{
+					"a": {"x", "y"},
+					"b": {"y", "z"},
+				})
+				wd.AddAddressModelMap("addrA", "a")
+				wd.Mark("addrA")
+				wd.UnMark("addrA")
+
+				result := wd.EnforceGroupExclusivity("b")
+				Expect(result.EvictedCount).To(Equal(1))
+				Expect(pm.getShutdownCalls()).To(ConsistOf("a"))
+			})
+
+			It("evicts every conflicting loaded model", func() {
+				wd = model.NewWatchDog(
+					model.WithProcessManager(pm),
+					model.WithForceEvictionWhenBusy(true),
+				)
+				wd.ReplaceModelGroups(map[string][]string{
+					"a": {"heavy"},
+					"b": {"heavy"},
+					"c": {"heavy"},
+				})
+				wd.AddAddressModelMap("addrA", "a")
+				wd.Mark("addrA")
+				wd.UnMark("addrA")
+				wd.AddAddressModelMap("addrB", "b")
+				wd.Mark("addrB")
+				wd.UnMark("addrB")
+
+				result := wd.EnforceGroupExclusivity("c")
+				Expect(result.EvictedCount).To(Equal(2))
+				Expect(pm.getShutdownCalls()).To(ConsistOf("a", "b"))
+			})
+
+			It("skips a pinned conflicting model and reports NeedMore", func() {
+				wd = model.NewWatchDog(
+					model.WithProcessManager(pm),
+					model.WithForceEvictionWhenBusy(true),
+				)
+				wd.ReplaceModelGroups(map[string][]string{
+					"a": {"heavy"},
+					"b": {"heavy"},
+				})
+				wd.SetPinnedModels([]string{"a"})
+				wd.AddAddressModelMap("addrA", "a")
+				wd.Mark("addrA")
+				wd.UnMark("addrA")
+
+				result := wd.EnforceGroupExclusivity("b")
+				Expect(result.EvictedCount).To(Equal(0))
+				Expect(result.NeedMore).To(BeTrue())
+				Expect(pm.getShutdownCalls()).To(BeEmpty())
+			})
+
+			It("skips a busy conflict when forceEvictionWhenBusy is false", func() {
+				wd = model.NewWatchDog(model.WithProcessManager(pm))
+				wd.ReplaceModelGroups(map[string][]string{
+					"a": {"heavy"},
+					"b": {"heavy"},
+				})
+				wd.AddAddressModelMap("addrA", "a")
+				wd.Mark("addrA") // leave busy
+
+				result := wd.EnforceGroupExclusivity("b")
+				Expect(result.EvictedCount).To(Equal(0))
+				Expect(result.NeedMore).To(BeTrue())
+				Expect(pm.getShutdownCalls()).To(BeEmpty())
+			})
+
+			It("evicts a busy conflict when forceEvictionWhenBusy is true", func() {
+				wd = model.NewWatchDog(
+					model.WithProcessManager(pm),
+					model.WithForceEvictionWhenBusy(true),
+				)
+				wd.ReplaceModelGroups(map[string][]string{
+					"a": {"heavy"},
+					"b": {"heavy"},
+				})
+				wd.AddAddressModelMap("addrA", "a")
+				wd.Mark("addrA") // leave busy
+
+				result := wd.EnforceGroupExclusivity("b")
+				Expect(result.EvictedCount).To(Equal(1))
+				Expect(result.NeedMore).To(BeFalse())
+				Expect(pm.getShutdownCalls()).To(ConsistOf("a"))
+			})
 		})
 	})
 

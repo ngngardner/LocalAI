@@ -3,15 +3,20 @@ package anthropic
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/mudler/LocalAI/core/backend"
 	"github.com/mudler/LocalAI/core/config"
+	"github.com/mudler/LocalAI/core/http/auth"
 	mcpTools "github.com/mudler/LocalAI/core/http/endpoints/mcp"
+	openaiEndpoint "github.com/mudler/LocalAI/core/http/endpoints/openai"
 	"github.com/mudler/LocalAI/core/http/middleware"
 	"github.com/mudler/LocalAI/core/schema"
+	"github.com/mudler/LocalAI/core/services/cloudproxy"
+	"github.com/mudler/LocalAI/core/services/routing/pii"
 	"github.com/mudler/LocalAI/core/templates"
 	"github.com/mudler/LocalAI/pkg/functions"
 	"github.com/mudler/LocalAI/pkg/model"
@@ -21,10 +26,11 @@ import (
 // MessagesEndpoint is the Anthropic Messages API endpoint
 // https://docs.anthropic.com/claude/reference/messages_post
 // @Summary Generate a message response for the given messages and model.
+// @Tags inference
 // @Param request body schema.AnthropicRequest true "query params"
 // @Success 200 {object} schema.AnthropicResponse "Response"
 // @Router /v1/messages [post]
-func MessagesEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evaluator *templates.Evaluator, appConfig *config.ApplicationConfig) echo.HandlerFunc {
+func MessagesEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evaluator *templates.Evaluator, appConfig *config.ApplicationConfig, natsClient mcpTools.MCPNATSClient, piiRedactor *pii.Redactor, piiEvents pii.EventStore) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		id := uuid.New().String()
 
@@ -44,6 +50,12 @@ func MessagesEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evalu
 
 		xlog.Debug("Anthropic Messages endpoint configuration read", "config", cfg)
 
+		// Cloud-proxy bail. Same shape as the OpenAI chat endpoint —
+		// forwards via the cloud-proxy gRPC backend.
+		if cfg.IsCloudProxyBackendPassthrough() {
+			return forwardCloudProxyAnthropicViaBackend(c, cfg, input, piiRedactor, piiEvents, ml, appConfig)
+		}
+
 		// Convert Anthropic messages to OpenAI format for internal processing
 		openAIMessages := convertAnthropicToOpenAIMessages(input)
 
@@ -51,7 +63,7 @@ func MessagesEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evalu
 		funcs, shouldUseFn := convertAnthropicTools(input, cfg)
 
 		// MCP injection: prompts, resources, and tools
-		var mcpToolInfos []mcpTools.MCPToolInfo
+		var mcpExecutor mcpTools.ToolExecutor
 		mcpServers := mcpTools.MCPServersFromMetadata(input.Metadata)
 		mcpPromptName, mcpPromptArgs := mcpTools.MCPPromptFromMetadata(input.Metadata)
 		mcpResourceURIs := mcpTools.MCPResourcesFromMetadata(input.Metadata)
@@ -59,76 +71,29 @@ func MessagesEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evalu
 		if (len(mcpServers) > 0 || mcpPromptName != "" || len(mcpResourceURIs) > 0) && (cfg.MCP.Servers != "" || cfg.MCP.Stdio != "") {
 			remote, stdio, mcpErr := cfg.MCP.MCPConfigFromYAML()
 			if mcpErr == nil {
+				mcpExecutor = mcpTools.NewToolExecutor(c.Request().Context(), natsClient, cfg.Name, remote, stdio, mcpServers)
+
+				// Prompt and resource injection (pre-processing step — resolves locally regardless of distributed mode)
 				namedSessions, sessErr := mcpTools.NamedSessionsFromMCPConfig(cfg.Name, remote, stdio, mcpServers)
 				if sessErr == nil && len(namedSessions) > 0 {
-					// Prompt injection
-					if mcpPromptName != "" {
-						prompts, discErr := mcpTools.DiscoverMCPPrompts(c.Request().Context(), namedSessions)
-						if discErr == nil {
-							promptMsgs, getErr := mcpTools.GetMCPPrompt(c.Request().Context(), prompts, mcpPromptName, mcpPromptArgs)
-							if getErr == nil {
-								var injected []schema.Message
-								for _, pm := range promptMsgs {
-									injected = append(injected, schema.Message{
-										Role:    string(pm.Role),
-										Content: mcpTools.PromptMessageToText(pm),
-									})
-								}
-								openAIMessages = append(injected, openAIMessages...)
-								xlog.Debug("Anthropic MCP prompt injected", "prompt", mcpPromptName, "messages", len(injected))
-							} else {
-								xlog.Error("Failed to get MCP prompt", "error", getErr)
-							}
-						}
+					mcpCtx, _ := mcpTools.InjectMCPContext(c.Request().Context(), namedSessions, mcpPromptName, mcpPromptArgs, mcpResourceURIs)
+					if mcpCtx != nil {
+						openAIMessages = append(mcpCtx.PromptMessages, openAIMessages...)
+						mcpTools.AppendResourceSuffix(openAIMessages, mcpCtx.ResourceSuffix)
 					}
+				}
 
-					// Resource injection
-					if len(mcpResourceURIs) > 0 {
-						resources, discErr := mcpTools.DiscoverMCPResources(c.Request().Context(), namedSessions)
-						if discErr == nil {
-							var resourceTexts []string
-							for _, uri := range mcpResourceURIs {
-								content, readErr := mcpTools.ReadMCPResource(c.Request().Context(), resources, uri)
-								if readErr != nil {
-									xlog.Error("Failed to read MCP resource", "error", readErr, "uri", uri)
-									continue
-								}
-								name := uri
-								for _, r := range resources {
-									if r.URI == uri {
-										name = r.Name
-										break
-									}
-								}
-								resourceTexts = append(resourceTexts, fmt.Sprintf("--- MCP Resource: %s ---\n%s", name, content))
-							}
-							if len(resourceTexts) > 0 && len(openAIMessages) > 0 {
-								lastIdx := len(openAIMessages) - 1
-								suffix := "\n\n" + strings.Join(resourceTexts, "\n\n")
-								switch ct := openAIMessages[lastIdx].Content.(type) {
-								case string:
-									openAIMessages[lastIdx].Content = ct + suffix
-								default:
-									openAIMessages[lastIdx].Content = fmt.Sprintf("%v%s", ct, suffix)
-								}
-								xlog.Debug("Anthropic MCP resources injected", "count", len(resourceTexts))
-							}
+				// Tool injection via executor
+				if mcpExecutor.HasTools() {
+					mcpFuncs, discErr := mcpExecutor.DiscoverTools(c.Request().Context())
+					if discErr == nil {
+						for _, fn := range mcpFuncs {
+							funcs = append(funcs, fn)
 						}
-					}
-
-					// Tool injection
-					if len(mcpServers) > 0 {
-						discovered, discErr := mcpTools.DiscoverMCPTools(c.Request().Context(), namedSessions)
-						if discErr == nil {
-							mcpToolInfos = discovered
-							for _, ti := range mcpToolInfos {
-								funcs = append(funcs, ti.Function)
-							}
-							shouldUseFn = len(funcs) > 0 && cfg.ShouldUseFunctions()
-							xlog.Debug("Anthropic MCP tools injected", "count", len(mcpToolInfos), "total_funcs", len(funcs))
-						} else {
-							xlog.Error("Failed to discover MCP tools", "error", discErr)
-						}
+						shouldUseFn = len(funcs) > 0 && cfg.ShouldUseFunctions()
+						xlog.Debug("Anthropic MCP tools injected", "count", len(mcpFuncs), "total_funcs", len(funcs))
+					} else {
+						xlog.Error("Failed to discover MCP tools", "error", discErr)
 					}
 				}
 			} else {
@@ -176,19 +141,19 @@ func MessagesEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evalu
 		xlog.Debug("Anthropic Messages - Prompt (after templating)", "prompt", predInput)
 
 		if input.Stream {
-			return handleAnthropicStream(c, id, input, cfg, ml, cl, appConfig, predInput, openAIReq, funcs, shouldUseFn, mcpToolInfos, evaluator)
+			return handleAnthropicStream(c, id, input, cfg, ml, cl, appConfig, predInput, openAIReq, funcs, shouldUseFn, mcpExecutor, evaluator, piiRedactor, piiEvents)
 		}
 
-		return handleAnthropicNonStream(c, id, input, cfg, ml, cl, appConfig, predInput, openAIReq, funcs, shouldUseFn, mcpToolInfos, evaluator)
+		return handleAnthropicNonStream(c, id, input, cfg, ml, cl, appConfig, predInput, openAIReq, funcs, shouldUseFn, mcpExecutor, evaluator)
 	}
 }
 
-func handleAnthropicNonStream(c echo.Context, id string, input *schema.AnthropicRequest, cfg *config.ModelConfig, ml *model.ModelLoader, cl *config.ModelConfigLoader, appConfig *config.ApplicationConfig, predInput string, openAIReq *schema.OpenAIRequest, funcs functions.Functions, shouldUseFn bool, mcpToolInfos []mcpTools.MCPToolInfo, evaluator *templates.Evaluator) error {
+func handleAnthropicNonStream(c echo.Context, id string, input *schema.AnthropicRequest, cfg *config.ModelConfig, ml *model.ModelLoader, cl *config.ModelConfigLoader, appConfig *config.ApplicationConfig, predInput string, openAIReq *schema.OpenAIRequest, funcs functions.Functions, shouldUseFn bool, mcpExecutor mcpTools.ToolExecutor, evaluator *templates.Evaluator) error {
 	mcpMaxIterations := 10
 	if cfg.Agent.MaxIterations > 0 {
 		mcpMaxIterations = cfg.Agent.MaxIterations
 	}
-	hasMCPTools := len(mcpToolInfos) > 0
+	hasMCPTools := mcpExecutor != nil && mcpExecutor.HasTools()
 
 	for mcpIteration := 0; mcpIteration <= mcpMaxIterations; mcpIteration++ {
 		// Re-template on each MCP iteration since messages may have changed
@@ -197,54 +162,24 @@ func handleAnthropicNonStream(c echo.Context, id string, input *schema.Anthropic
 			xlog.Debug("Anthropic MCP re-templating", "iteration", mcpIteration, "prompt_len", len(predInput))
 		}
 
-		images := []string{}
-		for _, m := range openAIReq.Messages {
-			images = append(images, m.StringImages...)
-		}
+		// Populate openAIReq fields for ComputeChoices
+		openAIReq.Tools = convertFuncsToOpenAITools(funcs)
+		openAIReq.ToolsChoice = input.ToolChoice
+		openAIReq.Metadata = input.Metadata
 
-		toolsJSON := ""
-		if len(funcs) > 0 {
-			openAITools := make([]functions.Tool, len(funcs))
-			for i, f := range funcs {
-				openAITools[i] = functions.Tool{Type: "function", Function: f}
-			}
-			if toolsBytes, err := json.Marshal(openAITools); err == nil {
-				toolsJSON = string(toolsBytes)
-			}
+		var result string
+		cb := func(s string, c *[]schema.Choice) {
+			result = s
 		}
-		toolChoiceJSON := ""
-		if input.ToolChoice != nil {
-			if toolChoiceBytes, err := json.Marshal(input.ToolChoice); err == nil {
-				toolChoiceJSON = string(toolChoiceBytes)
-			}
-		}
-
-		predFunc, err := backend.ModelInference(
-			input.Context, predInput, openAIReq.Messages, images, nil, nil, ml, cfg, cl, appConfig, nil, toolsJSON, toolChoiceJSON, nil, nil, nil, input.Metadata)
+		_, tokenUsage, chatDeltas, err := openaiEndpoint.ComputeChoices(openAIReq, predInput, cfg, cl, appConfig, ml, cb, nil)
 		if err != nil {
 			xlog.Error("Anthropic model inference failed", "error", err)
 			return sendAnthropicError(c, 500, "api_error", fmt.Sprintf("model inference failed: %v", err))
 		}
 
-		const maxEmptyRetries = 5
-		var prediction backend.LLMResponse
-		var result string
-		for attempt := 0; attempt <= maxEmptyRetries; attempt++ {
-			prediction, err = predFunc()
-			if err != nil {
-				xlog.Error("Anthropic prediction failed", "error", err)
-				return sendAnthropicError(c, 500, "api_error", fmt.Sprintf("prediction failed: %v", err))
-			}
-			result = backend.Finetune(*cfg, predInput, prediction.Response)
-			if result != "" || !shouldUseFn {
-				break
-			}
-			xlog.Warn("Anthropic: retrying prediction due to empty backend response", "attempt", attempt+1, "maxRetries", maxEmptyRetries)
-		}
-
 		// Try pre-parsed tool calls from C++ autoparser first, fall back to text parsing
 		var toolCalls []functions.FuncCallResults
-		if deltaToolCalls := functions.ToolCallsFromChatDeltas(prediction.ChatDeltas); len(deltaToolCalls) > 0 {
+		if deltaToolCalls := functions.ToolCallsFromChatDeltas(chatDeltas); len(deltaToolCalls) > 0 {
 			xlog.Debug("[ChatDeltas] Anthropic: using pre-parsed tool calls", "count", len(deltaToolCalls))
 			toolCalls = deltaToolCalls
 		} else {
@@ -256,7 +191,7 @@ func handleAnthropicNonStream(c echo.Context, id string, input *schema.Anthropic
 		if hasMCPTools && shouldUseFn && len(toolCalls) > 0 {
 			var hasMCPCalls bool
 			for _, tc := range toolCalls {
-				if mcpTools.IsMCPTool(mcpToolInfos, tc.Name) {
+				if mcpExecutor != nil && mcpExecutor.IsTool(tc.Name) {
 					hasMCPCalls = true
 					break
 				}
@@ -286,13 +221,12 @@ func handleAnthropicNonStream(c echo.Context, id string, input *schema.Anthropic
 
 				// Execute each MCP tool call and append results
 				for _, tc := range assistantMsg.ToolCalls {
-					if !mcpTools.IsMCPTool(mcpToolInfos, tc.FunctionCall.Name) {
+					if mcpExecutor == nil || !mcpExecutor.IsTool(tc.FunctionCall.Name) {
 						continue
 					}
 					xlog.Debug("Executing MCP tool (Anthropic)", "tool", tc.FunctionCall.Name, "iteration", mcpIteration)
-					toolResult, toolErr := mcpTools.ExecuteMCPToolCall(
-						c.Request().Context(), mcpToolInfos,
-						tc.FunctionCall.Name, tc.FunctionCall.Arguments,
+					toolResult, toolErr := mcpExecutor.ExecuteTool(
+						c.Request().Context(), tc.FunctionCall.Name, tc.FunctionCall.Arguments,
 					)
 					if toolErr != nil {
 						xlog.Error("MCP tool execution failed", "tool", tc.FunctionCall.Name, "error", toolErr)
@@ -319,10 +253,10 @@ func handleAnthropicNonStream(c echo.Context, id string, input *schema.Anthropic
 		if shouldUseFn && len(toolCalls) > 0 {
 			stopReason = "tool_use"
 			for _, tc := range toolCalls {
-				var inputArgs map[string]interface{}
+				var inputArgs map[string]any
 				if err := json.Unmarshal([]byte(tc.Arguments), &inputArgs); err != nil {
 					xlog.Warn("Failed to parse tool call arguments as JSON", "error", err, "args", tc.Arguments)
-					inputArgs = map[string]interface{}{"raw": tc.Arguments}
+					inputArgs = map[string]any{"raw": tc.Arguments}
 				}
 				contentBlocks = append(contentBlocks, schema.AnthropicContentBlock{
 					Type:  "tool_use",
@@ -334,6 +268,35 @@ func handleAnthropicNonStream(c echo.Context, id string, input *schema.Anthropic
 			textContent := functions.ParseTextContent(result, cfg.FunctionsConfig)
 			if textContent != "" {
 				contentBlocks = append([]schema.AnthropicContentBlock{{Type: "text", Text: textContent}}, contentBlocks...)
+			}
+		} else if !shouldUseFn && cfg.FunctionsConfig.AutomaticToolParsingFallback && result != "" {
+			// Automatic tool parsing fallback: no tools in request but model emitted tool call markup
+			parsed := functions.ParseFunctionCall(result, cfg.FunctionsConfig)
+			if len(parsed) > 0 {
+				stopReason = "tool_use"
+				stripped := functions.StripToolCallMarkup(result)
+				if stripped != "" {
+					contentBlocks = append(contentBlocks, schema.AnthropicContentBlock{Type: "text", Text: stripped})
+				}
+				for i, fc := range parsed {
+					var inputArgs map[string]any
+					if err := json.Unmarshal([]byte(fc.Arguments), &inputArgs); err != nil {
+						inputArgs = map[string]any{"raw": fc.Arguments}
+					}
+					toolCallID := fc.ID
+					if toolCallID == "" {
+						toolCallID = fmt.Sprintf("toolu_%s_%d", id, i)
+					}
+					contentBlocks = append(contentBlocks, schema.AnthropicContentBlock{
+						Type:  "tool_use",
+						ID:    toolCallID,
+						Name:  fc.Name,
+						Input: inputArgs,
+					})
+				}
+			} else {
+				stopReason = "end_turn"
+				contentBlocks = []schema.AnthropicContentBlock{{Type: "text", Text: result}}
 			}
 		} else {
 			stopReason = "end_turn"
@@ -350,8 +313,8 @@ func handleAnthropicNonStream(c echo.Context, id string, input *schema.Anthropic
 			StopReason: &stopReason,
 			Content:    contentBlocks,
 			Usage: schema.AnthropicUsage{
-				InputTokens:  prediction.Usage.Prompt,
-				OutputTokens: prediction.Usage.Completion,
+				InputTokens:  tokenUsage.Prompt,
+				OutputTokens: tokenUsage.Completion,
 			},
 		}
 
@@ -359,16 +322,44 @@ func handleAnthropicNonStream(c echo.Context, id string, input *schema.Anthropic
 			xlog.Debug("Anthropic Response", "response", string(respData))
 		}
 
+		middleware.StampUsage(c, input.Model, tokenUsage.Prompt, tokenUsage.Completion)
+
 		return c.JSON(200, resp)
 	} // end MCP iteration loop
 
 	return sendAnthropicError(c, 500, "api_error", "MCP iteration limit reached")
 }
 
-func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicRequest, cfg *config.ModelConfig, ml *model.ModelLoader, cl *config.ModelConfigLoader, appConfig *config.ApplicationConfig, predInput string, openAIReq *schema.OpenAIRequest, funcs functions.Functions, shouldUseFn bool, mcpToolInfos []mcpTools.MCPToolInfo, evaluator *templates.Evaluator) error {
+func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicRequest, cfg *config.ModelConfig, ml *model.ModelLoader, cl *config.ModelConfigLoader, appConfig *config.ApplicationConfig, predInput string, openAIReq *schema.OpenAIRequest, funcs functions.Functions, shouldUseFn bool, mcpExecutor mcpTools.ToolExecutor, evaluator *templates.Evaluator, piiRedactor *pii.Redactor, piiEvents pii.EventStore) error {
 	c.Response().Header().Set("Content-Type", "text/event-stream")
 	c.Response().Header().Set("Cache-Control", "no-cache")
 	c.Response().Header().Set("Connection", "keep-alive")
+
+	// Per-stream PII filter — same gating as the OpenAI chat path. The
+	// filter is wire-format-agnostic; we feed it the text portion of
+	// each text_delta and emit only what's safe to send. The filter
+	// holds back a tail of size MaxPatternLength-1 so a pattern split
+	// across chunk boundaries still gets masked. When PII is disabled
+	// for this model the filter is nil and emits flow unchanged.
+	var streamPIIFilter *pii.StreamFilter
+	if piiRedactor != nil && cfg.PIIIsEnabled() {
+		correlationID := c.Request().Header.Get("x-request-id")
+		userID := ""
+		if u := auth.GetUser(c); u != nil {
+			userID = u.ID
+		}
+		var overrides map[string]pii.Action
+		if raw := cfg.PIIPatternOverrides(); len(raw) > 0 {
+			overrides = make(map[string]pii.Action, len(raw))
+			for ovid, action := range raw {
+				switch pii.Action(action) {
+				case pii.ActionMask, pii.ActionBlock, pii.ActionRouteLocal:
+					overrides[ovid] = pii.Action(action)
+				}
+			}
+		}
+		streamPIIFilter = pii.NewStreamFilter(piiRedactor, overrides, piiEvents, correlationID, userID)
+	}
 
 	// Send message_start event
 	messageStart := schema.AnthropicStreamEvent{
@@ -388,19 +379,13 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 	if cfg.Agent.MaxIterations > 0 {
 		mcpMaxIterations = cfg.Agent.MaxIterations
 	}
-	hasMCPTools := len(mcpToolInfos) > 0
+	hasMCPTools := mcpExecutor != nil && mcpExecutor.HasTools()
 
 	for mcpIteration := 0; mcpIteration <= mcpMaxIterations; mcpIteration++ {
 		// Re-template on MCP iterations
 		if mcpIteration > 0 {
 			predInput = evaluator.TemplateMessages(*openAIReq, openAIReq.Messages, cfg, funcs, shouldUseFn)
 			xlog.Debug("Anthropic MCP stream re-templating", "iteration", mcpIteration)
-		}
-
-		openAIMessages := openAIReq.Messages
-		images := []string{}
-		for _, m := range openAIMessages {
-			images = append(images, m.StringImages...)
 		}
 
 		// Track accumulated content for tool call detection
@@ -412,7 +397,7 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 		// Send initial content_block_start event
 		contentBlockStart := schema.AnthropicStreamEvent{
 			Type:         "content_block_start",
-			Index:        currentBlockIndex,
+			Index:        intPtr(currentBlockIndex),
 			ContentBlock: &schema.AnthropicContentBlock{Type: "text", Text: ""},
 		}
 		sendAnthropicSSE(c, contentBlockStart)
@@ -420,7 +405,33 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 		// Collect tool calls for MCP execution
 		var collectedToolCalls []functions.FuncCallResults
 
+		// SSE keepalive: send comment pings every 3s until the first token arrives.
+		// This prevents clients (e.g. Claude Code) from timing out while the model loads or processes the prompt.
+		firstTokenReceived := make(chan struct{})
+		keepaliveDone := make(chan struct{})
+		go func() {
+			defer close(keepaliveDone)
+			ticker := time.NewTicker(3 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-firstTokenReceived:
+					return
+				case <-c.Request().Context().Done():
+					return
+				case <-ticker.C:
+					fmt.Fprintf(c.Response().Writer, "event: ping\ndata: {\"type\": \"ping\"}\n\n")
+					c.Response().Flush()
+				}
+			}
+		}()
+		firstTokenOnce := sync.Once{}
+
 		tokenCallback := func(token string, usage backend.TokenUsage) bool {
+			firstTokenOnce.Do(func() {
+				close(firstTokenReceived)
+				<-keepaliveDone // wait for keepalive goroutine to exit before writing
+			})
 			accumulatedContent += token
 
 			if shouldUseFn {
@@ -429,9 +440,10 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 
 				if len(toolCalls) > toolCallsEmitted {
 					if !inToolCall && currentBlockIndex == 0 {
+						drainStreamPIIToText(c, streamPIIFilter, intPtr(currentBlockIndex))
 						sendAnthropicSSE(c, schema.AnthropicStreamEvent{
 							Type:  "content_block_stop",
-							Index: currentBlockIndex,
+							Index: intPtr(currentBlockIndex),
 						})
 						currentBlockIndex++
 						inToolCall = true
@@ -441,7 +453,7 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 						tc := toolCalls[i]
 						sendAnthropicSSE(c, schema.AnthropicStreamEvent{
 							Type:  "content_block_start",
-							Index: currentBlockIndex,
+							Index: intPtr(currentBlockIndex),
 							ContentBlock: &schema.AnthropicContentBlock{
 								Type: "tool_use",
 								ID:   fmt.Sprintf("toolu_%s_%d", id, i),
@@ -450,7 +462,7 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 						})
 						sendAnthropicSSE(c, schema.AnthropicStreamEvent{
 							Type:  "content_block_delta",
-							Index: currentBlockIndex,
+							Index: intPtr(currentBlockIndex),
 							Delta: &schema.AnthropicStreamDelta{
 								Type:        "input_json_delta",
 								PartialJSON: tc.Arguments,
@@ -458,7 +470,7 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 						})
 						sendAnthropicSSE(c, schema.AnthropicStreamEvent{
 							Type:  "content_block_stop",
-							Index: currentBlockIndex,
+							Index: intPtr(currentBlockIndex),
 						})
 						currentBlockIndex++
 					}
@@ -468,59 +480,124 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 				}
 			}
 
-			if !inToolCall {
-				sendAnthropicSSE(c, schema.AnthropicStreamEvent{
-					Type:  "content_block_delta",
-					Index: 0,
-					Delta: &schema.AnthropicStreamDelta{
-						Type: "text_delta",
-						Text: token,
-					},
-				})
+			if !inToolCall && token != "" {
+				out := token
+				if streamPIIFilter != nil {
+					out = streamPIIFilter.Push(token)
+				}
+				if out != "" {
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_delta",
+						Index: intPtr(0),
+						Delta: &schema.AnthropicStreamDelta{
+							Type: "text_delta",
+							Text: out,
+						},
+					})
+				}
 			}
 			return true
 		}
 
-		toolsJSON := ""
-		if len(funcs) > 0 {
-			openAITools := make([]functions.Tool, len(funcs))
-			for i, f := range funcs {
-				openAITools[i] = functions.Tool{Type: "function", Function: f}
-			}
-			if toolsBytes, err := json.Marshal(openAITools); err == nil {
-				toolsJSON = string(toolsBytes)
-			}
-		}
-		toolChoiceJSON := ""
-		if input.ToolChoice != nil {
-			if toolChoiceBytes, err := json.Marshal(input.ToolChoice); err == nil {
-				toolChoiceJSON = string(toolChoiceBytes)
-			}
-		}
+		// Populate openAIReq fields for ComputeChoices
+		openAIReq.Tools = convertFuncsToOpenAITools(funcs)
+		openAIReq.ToolsChoice = input.ToolChoice
+		openAIReq.Metadata = input.Metadata
 
-		predFunc, err := backend.ModelInference(
-			input.Context, predInput, openAIMessages, images, nil, nil, ml, cfg, cl, appConfig, tokenCallback, toolsJSON, toolChoiceJSON, nil, nil, nil, input.Metadata)
+		_, tokenUsage, chatDeltas, err := openaiEndpoint.ComputeChoices(openAIReq, predInput, cfg, cl, appConfig, ml, func(s string, c *[]schema.Choice) {}, tokenCallback)
+
+		// Stop the keepalive goroutine now that inference is done
+		firstTokenOnce.Do(func() { close(firstTokenReceived) })
+		<-keepaliveDone
+
 		if err != nil {
 			xlog.Error("Anthropic stream model inference failed", "error", err)
-			return sendAnthropicError(c, 500, "api_error", fmt.Sprintf("model inference failed: %v", err))
+			sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+				Type: "error",
+				Error: &schema.AnthropicError{
+					Type:    "api_error",
+					Message: fmt.Sprintf("model inference failed: %v", err),
+				},
+			})
+			return nil
 		}
 
-		prediction, err := predFunc()
-		if err != nil {
-			xlog.Error("Anthropic stream prediction failed", "error", err)
-			return sendAnthropicError(c, 500, "api_error", fmt.Sprintf("prediction failed: %v", err))
-		}
+		// Check chat deltas from C++ autoparser — when active, the raw
+		// message is cleared and content/tool calls arrive via ChatDeltas.
+		if len(chatDeltas) > 0 {
+			deltaContent := functions.ContentFromChatDeltas(chatDeltas)
+			deltaToolCalls := functions.ToolCallsFromChatDeltas(chatDeltas)
 
-		// Also check chat deltas for tool calls
-		if deltaToolCalls := functions.ToolCallsFromChatDeltas(prediction.ChatDeltas); len(deltaToolCalls) > 0 && len(collectedToolCalls) == 0 {
-			collectedToolCalls = deltaToolCalls
+			// Emit text content from ChatDeltas only when the tokenCallback
+			// didn't already stream it (autoparser clears raw text, so
+			// accumulatedContent will be empty in that case).
+			if deltaContent != "" && !inToolCall && accumulatedContent == "" {
+				out := deltaContent
+				if streamPIIFilter != nil {
+					out = streamPIIFilter.Push(deltaContent)
+				}
+				if out != "" {
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_delta",
+						Index: intPtr(0),
+						Delta: &schema.AnthropicStreamDelta{
+							Type: "text_delta",
+							Text: out,
+						},
+					})
+				}
+			}
+
+			// Emit tool_use blocks from ChatDeltas
+			if len(deltaToolCalls) > 0 && len(collectedToolCalls) == 0 {
+				collectedToolCalls = deltaToolCalls
+
+				if !inToolCall && currentBlockIndex == 0 {
+					drainStreamPIIToText(c, streamPIIFilter, intPtr(currentBlockIndex))
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_stop",
+						Index: intPtr(currentBlockIndex),
+					})
+					currentBlockIndex++
+					inToolCall = true
+				}
+				for i, tc := range deltaToolCalls {
+					toolCallID := tc.ID
+					if toolCallID == "" {
+						toolCallID = fmt.Sprintf("toolu_%s_%d", id, i)
+					}
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_start",
+						Index: intPtr(currentBlockIndex),
+						ContentBlock: &schema.AnthropicContentBlock{
+							Type: "tool_use",
+							ID:   toolCallID,
+							Name: tc.Name,
+						},
+					})
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_delta",
+						Index: intPtr(currentBlockIndex),
+						Delta: &schema.AnthropicStreamDelta{
+							Type:        "input_json_delta",
+							PartialJSON: tc.Arguments,
+						},
+					})
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_stop",
+						Index: intPtr(currentBlockIndex),
+					})
+					currentBlockIndex++
+					toolCallsEmitted++
+				}
+			}
 		}
 
 		// MCP streaming tool execution: if we collected MCP tool calls, execute and loop
 		if hasMCPTools && len(collectedToolCalls) > 0 {
 			var hasMCPCalls bool
 			for _, tc := range collectedToolCalls {
-				if mcpTools.IsMCPTool(mcpToolInfos, tc.Name) {
+				if mcpExecutor != nil && mcpExecutor.IsTool(tc.Name) {
 					hasMCPCalls = true
 					break
 				}
@@ -550,13 +627,12 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 
 				// Execute MCP tool calls
 				for _, tc := range assistantMsg.ToolCalls {
-					if !mcpTools.IsMCPTool(mcpToolInfos, tc.FunctionCall.Name) {
+					if mcpExecutor == nil || !mcpExecutor.IsTool(tc.FunctionCall.Name) {
 						continue
 					}
 					xlog.Debug("Executing MCP tool (Anthropic stream)", "tool", tc.FunctionCall.Name, "iteration", mcpIteration)
-					toolResult, toolErr := mcpTools.ExecuteMCPToolCall(
-						c.Request().Context(), mcpToolInfos,
-						tc.FunctionCall.Name, tc.FunctionCall.Arguments,
+					toolResult, toolErr := mcpExecutor.ExecuteTool(
+						c.Request().Context(), tc.FunctionCall.Name, tc.FunctionCall.Arguments,
 					)
 					if toolErr != nil {
 						xlog.Error("MCP tool execution failed", "tool", tc.FunctionCall.Name, "error", toolErr)
@@ -576,11 +652,62 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 			}
 		}
 
-		// No MCP tools to execute, close stream
+		// Automatic tool parsing fallback for streaming: when no tools were requested
+		// but the model emitted tool call markup, parse and emit as tool_use blocks.
+		if !shouldUseFn && cfg.FunctionsConfig.AutomaticToolParsingFallback && accumulatedContent != "" && toolCallsEmitted == 0 {
+			parsed := functions.ParseFunctionCall(accumulatedContent, cfg.FunctionsConfig)
+			if len(parsed) > 0 {
+				// Close the text content block (after flushing any
+				// residual the streaming PII filter held back).
+				drainStreamPIIToText(c, streamPIIFilter, intPtr(currentBlockIndex))
+				sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+					Type:  "content_block_stop",
+					Index: intPtr(currentBlockIndex),
+				})
+				currentBlockIndex++
+				inToolCall = true
+
+				for i, fc := range parsed {
+					toolCallID := fc.ID
+					if toolCallID == "" {
+						toolCallID = fmt.Sprintf("toolu_%s_%d", id, i)
+					}
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_start",
+						Index: intPtr(currentBlockIndex),
+						ContentBlock: &schema.AnthropicContentBlock{
+							Type: "tool_use",
+							ID:   toolCallID,
+							Name: fc.Name,
+						},
+					})
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_delta",
+						Index: intPtr(currentBlockIndex),
+						Delta: &schema.AnthropicStreamDelta{
+							Type:        "input_json_delta",
+							PartialJSON: fc.Arguments,
+						},
+					})
+					sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+						Type:  "content_block_stop",
+						Index: intPtr(currentBlockIndex),
+					})
+					currentBlockIndex++
+					toolCallsEmitted++
+				}
+			}
+		}
+
+		// No MCP tools to execute, close stream. drainStreamPIIToText
+		// flushes any residual the streaming PII filter held back as
+		// part of its trailing pattern-window before we close the
+		// text content block.
 		if !inToolCall {
+			drainStreamPIIToText(c, streamPIIFilter, intPtr(0))
 			sendAnthropicSSE(c, schema.AnthropicStreamEvent{
 				Type:  "content_block_stop",
-				Index: 0,
+				Index: intPtr(0),
 			})
 		}
 
@@ -595,13 +722,15 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 				StopReason: &stopReason,
 			},
 			Usage: &schema.AnthropicUsage{
-				OutputTokens: prediction.Usage.Completion,
+				OutputTokens: tokenUsage.Completion,
 			},
 		})
 
 		sendAnthropicSSE(c, schema.AnthropicStreamEvent{
 			Type: "message_stop",
 		})
+
+		middleware.StampUsage(c, input.Model, tokenUsage.Prompt, tokenUsage.Completion)
 
 		return nil
 	} // end MCP iteration loop
@@ -611,6 +740,40 @@ func handleAnthropicStream(c echo.Context, id string, input *schema.AnthropicReq
 		Type: "message_stop",
 	})
 	return nil
+}
+
+func convertFuncsToOpenAITools(funcs functions.Functions) []functions.Tool {
+	tools := make([]functions.Tool, len(funcs))
+	for i, f := range funcs {
+		tools[i] = functions.Tool{Type: "function", Function: f}
+	}
+	return tools
+}
+
+func intPtr(i int) *int { return &i }
+
+// drainStreamPIIToText flushes any residual the streaming PII filter
+// has been holding back as part of its trailing pattern-window, and
+// emits it as one final text_delta into the named block before the
+// caller closes that block. Drain is idempotent: calling it twice on
+// the same filter returns "" the second time. Safe to call with a nil
+// filter (no-op).
+func drainStreamPIIToText(c echo.Context, sf *pii.StreamFilter, index *int) {
+	if sf == nil {
+		return
+	}
+	residual := sf.Drain()
+	if residual == "" {
+		return
+	}
+	sendAnthropicSSE(c, schema.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: index,
+		Delta: &schema.AnthropicStreamDelta{
+			Type: "text_delta",
+			Text: residual,
+		},
+	})
 }
 
 func sendAnthropicSSE(c echo.Context, event schema.AnthropicStreamEvent) {
@@ -658,7 +821,7 @@ func convertAnthropicToOpenAIMessages(input *schema.AnthropicRequest) []schema.M
 		case string:
 			openAIMsg.StringContent = content
 			openAIMsg.Content = content
-		case []interface{}:
+		case []any:
 			// Handle array of content blocks
 			var textContent string
 			var stringImages []string
@@ -666,7 +829,7 @@ func convertAnthropicToOpenAIMessages(input *schema.AnthropicRequest) []schema.M
 			toolCallIndex := 0
 
 			for _, block := range content {
-				if blockMap, ok := block.(map[string]interface{}); ok {
+				if blockMap, ok := block.(map[string]any); ok {
 					blockType, _ := blockMap["type"].(string)
 					switch blockType {
 					case "text":
@@ -675,7 +838,7 @@ func convertAnthropicToOpenAIMessages(input *schema.AnthropicRequest) []schema.M
 						}
 					case "image":
 						// Handle image content
-						if source, ok := blockMap["source"].(map[string]interface{}); ok {
+						if source, ok := blockMap["source"].(map[string]any); ok {
 							if sourceType, ok := source["type"].(string); ok && sourceType == "base64" {
 								if data, ok := source["data"].(string); ok {
 									mediaType, _ := source["media_type"].(string)
@@ -690,14 +853,14 @@ func convertAnthropicToOpenAIMessages(input *schema.AnthropicRequest) []schema.M
 						toolID, _ := blockMap["id"].(string)
 						toolName, _ := blockMap["name"].(string)
 						toolInput := blockMap["input"]
-						
+
 						// Serialize input to JSON string
 						inputJSON, err := json.Marshal(toolInput)
 						if err != nil {
 							xlog.Warn("Failed to marshal tool input", "error", err)
 							inputJSON = []byte("{}")
 						}
-						
+
 						toolCalls = append(toolCalls, schema.ToolCall{
 							Index: toolCallIndex,
 							ID:    toolID,
@@ -717,16 +880,16 @@ func convertAnthropicToOpenAIMessages(input *schema.AnthropicRequest) []schema.M
 						if isErrorPtr, ok := blockMap["is_error"].(*bool); ok && isErrorPtr != nil {
 							isError = *isErrorPtr
 						}
-						
+
 						var resultText string
 						if resultContent, ok := blockMap["content"]; ok {
 							switch rc := resultContent.(type) {
 							case string:
 								resultText = rc
-							case []interface{}:
+							case []any:
 								// Array of content blocks
 								for _, cb := range rc {
-									if cbMap, ok := cb.(map[string]interface{}); ok {
+									if cbMap, ok := cb.(map[string]any); ok {
 										if cbMap["type"] == "text" {
 											if text, ok := cbMap["text"].(string); ok {
 												resultText += text
@@ -736,7 +899,7 @@ func convertAnthropicToOpenAIMessages(input *schema.AnthropicRequest) []schema.M
 								}
 							}
 						}
-						
+
 						// Add tool result as a tool role message
 						// We need to handle this differently - create a new message
 						if msg.Role == "user" {
@@ -753,7 +916,7 @@ func convertAnthropicToOpenAIMessages(input *schema.AnthropicRequest) []schema.M
 			openAIMsg.StringContent = textContent
 			openAIMsg.Content = textContent
 			openAIMsg.StringImages = stringImages
-			
+
 			// Add tool calls if present
 			if len(toolCalls) > 0 {
 				openAIMsg.ToolCalls = toolCalls
@@ -771,7 +934,7 @@ func convertAnthropicTools(input *schema.AnthropicRequest, cfg *config.ModelConf
 	if len(input.Tools) == 0 {
 		return nil, false
 	}
-	
+
 	var funcs functions.Functions
 	for _, tool := range input.Tools {
 		f := functions.Function{
@@ -781,7 +944,7 @@ func convertAnthropicTools(input *schema.AnthropicRequest, cfg *config.ModelConf
 		}
 		funcs = append(funcs, f)
 	}
-	
+
 	// Handle tool_choice
 	if input.ToolChoice != nil {
 		switch tc := input.ToolChoice.(type) {
@@ -795,16 +958,32 @@ func convertAnthropicTools(input *schema.AnthropicRequest, cfg *config.ModelConf
 				return nil, false
 			}
 			// "auto" is the default - let model decide
-		case map[string]interface{}:
+		case map[string]any:
 			// Specific tool selection: {"type": "tool", "name": "tool_name"}
 			if tcType, ok := tc["type"].(string); ok && tcType == "tool" {
 				if name, ok := tc["name"].(string); ok {
 					// Force specific tool
-					cfg.SetFunctionCallString(name)
+					cfg.SetFunctionCallNameString(name)
 				}
 			}
 		}
 	}
-	
+
 	return funcs, len(funcs) > 0 && cfg.ShouldUseFunctions()
+}
+
+// forwardCloudProxyAnthropicViaBackend marshals the Anthropic request,
+// constructs the streaming PII filter (when applicable), and hands the
+// body off to the cloud-proxy gRPC backend. Model swap + upstream auth
+// headers are applied inside the backend; the filter is built here
+// because the auth/correlation context only exists in the echo handler.
+func forwardCloudProxyAnthropicViaBackend(c echo.Context, cfg *config.ModelConfig, input *schema.AnthropicRequest, piiRedactor *pii.Redactor, piiEvents pii.EventStore, ml *model.ModelLoader, appConfig *config.ApplicationConfig) error {
+	body, err := json.Marshal(input)
+	if err != nil {
+		return sendAnthropicError(c, 400, "invalid_request_error", "cloudproxy: marshal request: "+err.Error())
+	}
+
+	correlationID := c.Request().Header.Get("x-request-id")
+	streamFilter := cloudproxy.BuildStreamFilter(c, cfg, input.Stream, piiRedactor, piiEvents, correlationID)
+	return cloudproxy.ForwardViaBackend(c, cfg, body, streamFilter, ml, appConfig)
 }

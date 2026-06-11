@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/mudler/LocalAI/core/application"
+	skillsManager "github.com/mudler/LocalAI/core/services/skills"
 	skilldomain "github.com/mudler/skillserver/pkg/domain"
 )
 
@@ -28,7 +29,7 @@ func skillToResponse(s skilldomain.Skill) skillResponse {
 		out.License = s.Metadata.License
 		out.Compatibility = s.Metadata.Compatibility
 		out.Metadata = s.Metadata.Metadata
-		out.AllowedTools = s.Metadata.AllowedTools
+		out.AllowedTools = s.Metadata.AllowedTools.String()
 	}
 	return out
 }
@@ -41,30 +42,84 @@ func skillsToResponses(skills []skilldomain.Skill) []skillResponse {
 	return out
 }
 
+// getSkillManager returns a SkillManager for the request's user.
+func getSkillManager(c echo.Context, app *application.Application) (skillsManager.Manager, error) {
+	svc := app.AgentPoolService()
+	userID := getUserID(c)
+	return svc.SkillManagerForUser(userID)
+}
+
+func getSkillManagerEffective(c echo.Context, app *application.Application) (skillsManager.Manager, error) {
+	svc := app.AgentPoolService()
+	userID := effectiveUserID(c)
+	return svc.SkillManagerForUser(userID)
+}
+
 func ListSkillsEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		skills, err := svc.ListSkills()
+		mgr, err := getSkillManager(c, app)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
-		return c.JSON(http.StatusOK, skillsToResponses(skills))
+		skills, err := mgr.List()
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+
+		// Admin cross-user aggregation
+		if wantsAllUsers(c) {
+			svc := app.AgentPoolService()
+			usm := svc.UserServicesManager()
+			if usm != nil {
+				userIDs, _ := usm.ListAllUserIDs()
+				userGroups := map[string]any{}
+				userID := getUserID(c)
+				for _, uid := range userIDs {
+					if uid == userID {
+						continue
+					}
+					uidMgr, mgrErr := svc.SkillManagerForUser(uid)
+					if mgrErr != nil {
+						continue
+					}
+					userSkills, listErr := uidMgr.List()
+					if listErr != nil || len(userSkills) == 0 {
+						continue
+					}
+					userGroups[uid] = map[string]any{"skills": skillsToResponses(userSkills)}
+				}
+				resp := map[string]any{
+					"skills": skillsToResponses(skills),
+				}
+				if len(userGroups) > 0 {
+					resp["user_groups"] = userGroups
+				}
+				return c.JSON(http.StatusOK, resp)
+			}
+		}
+
+		return c.JSON(http.StatusOK, map[string]any{"skills": skillsToResponses(skills)})
 	}
 }
 
 func GetSkillsConfigEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		cfg := svc.GetSkillsConfig()
-		return c.JSON(http.StatusOK, cfg)
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusOK, map[string]string{})
+		}
+		return c.JSON(http.StatusOK, mgr.GetConfig())
 	}
 }
 
 func SearchSkillsEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		query := c.QueryParam("q")
-		skills, err := svc.SearchSkills(query)
+		skills, err := mgr.Search(query)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
@@ -74,7 +129,10 @@ func SearchSkillsEndpoint(app *application.Application) echo.HandlerFunc {
 
 func CreateSkillEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		var payload struct {
 			Name          string            `json:"name"`
 			Description   string            `json:"description"`
@@ -87,7 +145,7 @@ func CreateSkillEndpoint(app *application.Application) echo.HandlerFunc {
 		if err := c.Bind(&payload); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
-		skill, err := svc.CreateSkill(payload.Name, payload.Description, payload.Content, payload.License, payload.Compatibility, payload.AllowedTools, payload.Metadata)
+		skill, err := mgr.Create(payload.Name, payload.Description, payload.Content, payload.License, payload.Compatibility, payload.AllowedTools, payload.Metadata)
 		if err != nil {
 			if strings.Contains(err.Error(), "already exists") {
 				return c.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
@@ -100,8 +158,11 @@ func CreateSkillEndpoint(app *application.Application) echo.HandlerFunc {
 
 func GetSkillEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		skill, err := svc.GetSkill(c.Param("name"))
+		mgr, err := getSkillManagerEffective(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		skill, err := mgr.Get(c.Param("name"))
 		if err != nil {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 		}
@@ -111,7 +172,10 @@ func GetSkillEndpoint(app *application.Application) echo.HandlerFunc {
 
 func UpdateSkillEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
+		mgr, err := getSkillManagerEffective(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		var payload struct {
 			Description   string            `json:"description"`
 			Content       string            `json:"content"`
@@ -123,7 +187,7 @@ func UpdateSkillEndpoint(app *application.Application) echo.HandlerFunc {
 		if err := c.Bind(&payload); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
-		skill, err := svc.UpdateSkill(c.Param("name"), payload.Description, payload.Content, payload.License, payload.Compatibility, payload.AllowedTools, payload.Metadata)
+		skill, err := mgr.Update(c.Param("name"), payload.Description, payload.Content, payload.License, payload.Compatibility, payload.AllowedTools, payload.Metadata)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -136,8 +200,11 @@ func UpdateSkillEndpoint(app *application.Application) echo.HandlerFunc {
 
 func DeleteSkillEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		if err := svc.DeleteSkill(c.Param("name")); err != nil {
+		mgr, err := getSkillManagerEffective(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		if err := mgr.Delete(c.Param("name")); err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
@@ -146,10 +213,12 @@ func DeleteSkillEndpoint(app *application.Application) echo.HandlerFunc {
 
 func ExportSkillEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		// The wildcard param captures the path after /export/
+		mgr, err := getSkillManagerEffective(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		name := c.Param("*")
-		data, err := svc.ExportSkill(name)
+		data, err := mgr.Export(name)
 		if err != nil {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 		}
@@ -161,7 +230,10 @@ func ExportSkillEndpoint(app *application.Application) echo.HandlerFunc {
 
 func ImportSkillEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		file, err := c.FormFile("file")
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "file required"})
@@ -175,7 +247,7 @@ func ImportSkillEndpoint(app *application.Application) echo.HandlerFunc {
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
-		skill, err := svc.ImportSkill(data)
+		skill, err := mgr.Import(data)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
@@ -187,8 +259,11 @@ func ImportSkillEndpoint(app *application.Application) echo.HandlerFunc {
 
 func ListSkillResourcesEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		resources, skill, err := svc.ListSkillResources(c.Param("name"))
+		mgr, err := getSkillManagerEffective(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		resources, skill, err := mgr.ListResources(c.Param("name"))
 		if err != nil {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 		}
@@ -224,8 +299,11 @@ func ListSkillResourcesEndpoint(app *application.Application) echo.HandlerFunc {
 
 func GetSkillResourceEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		content, info, err := svc.GetSkillResource(c.Param("name"), c.Param("*"))
+		mgr, err := getSkillManagerEffective(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		content, info, err := mgr.GetResource(c.Param("name"), c.Param("*"))
 		if err != nil {
 			return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 		}
@@ -244,9 +322,12 @@ func GetSkillResourceEndpoint(app *application.Application) echo.HandlerFunc {
 
 func CreateSkillResourceEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		file, err := c.FormFile("file")
+		mgr, err := getSkillManager(c, app)
 		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		file, fileErr := c.FormFile("file")
+		if fileErr != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "file is required"})
 		}
 		path := c.FormValue("path")
@@ -262,7 +343,7 @@ func CreateSkillResourceEndpoint(app *application.Application) echo.HandlerFunc 
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
-		if err := svc.CreateSkillResource(c.Param("name"), path, data); err != nil {
+		if err := mgr.CreateResource(c.Param("name"), path, data); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 		return c.JSON(http.StatusCreated, map[string]string{"path": path})
@@ -271,14 +352,17 @@ func CreateSkillResourceEndpoint(app *application.Application) echo.HandlerFunc 
 
 func UpdateSkillResourceEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		var payload struct {
 			Content string `json:"content"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
-		if err := svc.UpdateSkillResource(c.Param("name"), c.Param("*"), payload.Content); err != nil {
+		if err := mgr.UpdateResource(c.Param("name"), c.Param("*"), payload.Content); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
@@ -287,8 +371,11 @@ func UpdateSkillResourceEndpoint(app *application.Application) echo.HandlerFunc 
 
 func DeleteSkillResourceEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		if err := svc.DeleteSkillResource(c.Param("name"), c.Param("*")); err != nil {
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		if err := mgr.DeleteResource(c.Param("name"), c.Param("*")); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
@@ -299,8 +386,11 @@ func DeleteSkillResourceEndpoint(app *application.Application) echo.HandlerFunc 
 
 func ListGitReposEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		repos, err := svc.ListGitRepos()
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		repos, err := mgr.ListGitRepos()
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
@@ -310,14 +400,17 @@ func ListGitReposEndpoint(app *application.Application) echo.HandlerFunc {
 
 func AddGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		var payload struct {
 			URL string `json:"url"`
 		}
 		if err := c.Bind(&payload); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
-		repo, err := svc.AddGitRepo(payload.URL)
+		repo, err := mgr.AddGitRepo(payload.URL)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
@@ -327,7 +420,10 @@ func AddGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 
 func UpdateGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		var payload struct {
 			URL     string `json:"url"`
 			Enabled *bool  `json:"enabled"`
@@ -335,7 +431,7 @@ func UpdateGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 		if err := c.Bind(&payload); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
-		repo, err := svc.UpdateGitRepo(c.Param("id"), payload.URL, payload.Enabled)
+		repo, err := mgr.UpdateGitRepo(c.Param("id"), payload.URL, payload.Enabled)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
@@ -348,8 +444,11 @@ func UpdateGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 
 func DeleteGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		if err := svc.DeleteGitRepo(c.Param("id")); err != nil {
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		if err := mgr.DeleteGitRepo(c.Param("id")); err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 			}
@@ -361,8 +460,11 @@ func DeleteGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 
 func SyncGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		if err := svc.SyncGitRepo(c.Param("id")); err != nil {
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		if err := mgr.SyncGitRepo(c.Param("id")); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 		return c.JSON(http.StatusAccepted, map[string]string{"status": "syncing"})
@@ -371,8 +473,11 @@ func SyncGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 
 func ToggleGitRepoEndpoint(app *application.Application) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		svc := app.AgentPoolService()
-		repo, err := svc.ToggleGitRepo(c.Param("id"))
+		mgr, err := getSkillManager(c, app)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		repo, err := mgr.ToggleGitRepo(c.Param("id"))
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}

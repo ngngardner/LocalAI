@@ -6,35 +6,95 @@ icon = "sync"
 
 +++
 
-## Community integrations
+## Community Integrations
 
-List of projects that are using directly LocalAI behind the scenes can be found [here](https://github.com/mudler/LocalAI#-community-and-integrations).
+The lists below cover software and community projects that integrate with LocalAI.
 
-The list below is a list of software that integrates with LocalAI.
+Feel free to open up a Pull request (by clicking at the "Edit page" below) to get your project added!
+
+### Build & Deploy
+
+- [aikit](https://github.com/sozercan/aikit) — Build and deploy custom LocalAI containers
+- [Helm chart](https://github.com/go-skynet/helm-charts) — Deploy LocalAI on Kubernetes
+- [GitHub Actions](https://github.com/marketplace/actions/start-localai) — Use LocalAI in CI/CD workflows
+
+### Web UIs
+
+- [localai-admin](https://github.com/Jirubizu/localai-admin)
+- [LocalAI-frontend](https://github.com/go-skynet/LocalAI-frontend)
+- [QA-Pilot](https://github.com/reid41/QA-Pilot) — Interactive chat for navigating GitHub code repositories
+- [Big AGI](https://github.com/enricoros/big-agi) — Powerful web interface running entirely in the browser
+
+### Agentic Libraries & Assistants
+
+- [cogito](https://github.com/mudler/cogito) — Agentic library for Go
+- [LocalAGI](https://github.com/mudler/LocalAGI) — Local smart assistant with autonomous agents
+
+### MCP Servers
+
+- [MCPs](https://github.com/mudler/MCPs) — Model Context Protocol servers
+
+### OS Assistants
+
+- [Keygeist](https://github.com/mudler/Keygeist) — AI-powered keyboard operator for Linux
+
+### Voice
+
+- [VoxInput](https://github.com/richiejp/VoxInput) — Use voice to control your desktop
+
+### IDE & Editor Plugins
+
+- [VSCode extension](https://github.com/badgooooor/localai-vscode-plugin)
+- [GPTLocalhost (Word Add-in)](https://gptlocalhost.com/demo#LocalAI) — Run LocalAI in Microsoft Word locally
+
+### Framework Integrations
+
+- [Langchain (Python)](https://python.langchain.com/docs/integrations/providers/localai/) — [pypi](https://pypi.org/project/langchain-localai/)
+- [langchain4j](https://github.com/langchain4j/langchain4j) — Java LangChain
+- [lingoose](https://github.com/henomis/lingoose) — Go framework for LLM apps
+- [LLPhant](https://github.com/theodo-group/LLPhant) — PHP library for LLMs and vector databases
+- [FlowiseAI](https://github.com/FlowiseAI/Flowise) — Low-code LLM app builder
+- [LLMStack](https://github.com/trypromptly/LLMStack)
+- [Midori AI Subsystem Manager](https://io.midori-ai.xyz/subsystem/manager/)
+
+### Terminal Tools
+
+- [ShellOracle](https://github.com/djcopley/ShellOracle) — Terminal utility
+- [Shell-Pilot](https://github.com/reid41/shell-pilot) — Interact with LLMs via pure shell scripts
+- [Mods](https://github.com/charmbracelet/mods) — AI on the command line
+
+### Chat Bots
+
+- [Discord bot](https://github.com/mudler/LocalAGI/tree/main/examples/discord)
+- [Slack bot](https://github.com/mudler/LocalAGI/tree/main/examples/slack)
+- [Telegram bot](https://github.com/mudler/LocalAI/tree/master/examples/telegram-bot)
+- [Hellper (Telegram)](https://github.com/JackBekket/Hellper)
+
+### Home Automation
+
+- [Extended OpenAI Conversation](https://github.com/jekalmin/extended_openai_conversation) — Conversation agent for Home Assistant that supports a custom OpenAI endpoint
+- [LLM Vision](https://github.com/valentinfrlch/ha-llmvision) — Image & video feed analysis for Home Assistant
+- [OpenAI TTS Speech Service](https://github.com/sfortis/openai_tts) - OpenAI TTS custom component for Home Assistant
+- [LocalAI Monitor](https://github.com/loryanstrant/HA-LocalAI-Monitor) — Monitor & control of LocalAI from Home Assistant
+- Nextcloud [integration plugin](https://apps.nextcloud.com/apps/integration_openai) and [AI assistant](https://apps.nextcloud.com/apps/assistant)
+
+### Automation & DevOps
+
+- [Reflexia](https://github.com/JackBekket/Reflexia) — Auto-documentation
+- [GitHelper](https://github.com/JackBekket/GitHelper) — GitHub bot for issues with code and documentation context
+- [kairos](https://github.com/kairos-io/kairos) — Immutable Linux OS
+
+### Other Integrations
 
 - [AnythingLLM](https://github.com/Mintplex-Labs/anything-llm)
-- [Logseq GPT3 OpenAI plugin](https://github.com/briansunter/logseq-plugin-gpt3-openai) allows to set a base URL, and works with LocalAI.
-- https://plugins.jetbrains.com/plugin/21056-codegpt allows for custom OpenAI compatible endpoints since 2.4.0
-- [Wave Terminal](https://docs.waveterm.dev/features/supportedLLMs/localai) has native support for LocalAI!
-- https://github.com/longy2k/obsidian-bmo-chatbot
-- https://github.com/FlowiseAI/Flowise
-- https://github.com/k8sgpt-ai/k8sgpt
-- https://github.com/kairos-io/kairos
-- https://github.com/langchain4j/langchain4j
-- https://github.com/henomis/lingoose
-- https://github.com/trypromptly/LLMStack
-- https://github.com/mattermost/openops
-- https://github.com/charmbracelet/mods
-- https://github.com/cedriking/spark
-- [Big AGI](https://github.com/enricoros/big-agi) is a powerful web interface entirely running in the browser, supporting LocalAI
-- [Midori AI Subsystem Manager](https://io.midori-ai.xyz/subsystem/manager/) is a powerful docker subsystem for running all types of AI programs
-- [LLPhant](https://github.com/theodo-group/LLPhant) is a PHP library for interacting with LLMs and Vector Databases
-- [GPTLocalhost (Word Add-in)](https://gptlocalhost.com/demo#LocalAI) - run LocalAI in Microsoft Word locally
-- use LocalAI from Nextcloud with the [integration plugin](https://apps.nextcloud.com/apps/integration_openai) and [AI assistant](https://apps.nextcloud.com/apps/assistant)
-- [Langchain](https://docs.langchain.com/oss/python/integrations/providers/localai) integration package [pypi](https://pypi.org/project/langchain-localai/)
-- [VoxInput](https://github.com/richiejp/VoxInput) - Use voice to control your desktop
-
-Feel free to open up a Pull request (by clicking at the "Edit page" below) to get a page for your project made or if you see a error on one of the pages!
+- [Logseq GPT3 OpenAI plugin](https://github.com/briansunter/logseq-plugin-gpt3-openai)
+- [CodeGPT (JetBrains)](https://plugins.jetbrains.com/plugin/21056-codegpt) — Custom OpenAI-compatible endpoints
+- [Wave Terminal](https://docs.waveterm.dev/features/supportedLLMs/localai) — Native LocalAI support
+- [Obsidian BMO Chatbot](https://github.com/longy2k/obsidian-bmo-chatbot)
+- [spark](https://github.com/cedriking/spark)
+- [openops (Mattermost)](https://github.com/mattermost/openops)
+- [Model Gallery](https://github.com/go-skynet/model-gallery)
+- [Examples](https://github.com/mudler/LocalAI/tree/master/examples/)
 
 ## Configuration Guides
 
@@ -105,6 +165,67 @@ This section provides step-by-step instructions for configuring specific softwar
 
    After saving the configuration file, restart OpenCode for the changes to take effect.
 
+
+### Claude Code
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) is Anthropic's official CLI tool for coding with Claude. LocalAI implements the Anthropic Messages API (`/v1/messages`), so Claude Code can be pointed directly at a LocalAI instance.
+
+#### Prerequisites
+
+- LocalAI must be running and accessible (either locally or on a network)
+- You need to know your LocalAI server's IP address/hostname and port (default is `8080`)
+- An API key configured in your LocalAI instance
+
+#### Running Claude Code with LocalAI
+
+Set the `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` environment variables to point Claude Code at your LocalAI server:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+ANTHROPIC_API_KEY=your-localai-api-key \
+claude --model your-model-name
+```
+
+For example, if you have a Gemma model loaded:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+ANTHROPIC_API_KEY=your-localai-api-key \
+claude --model gemma-4-12B-it-GGUF
+```
+
+You can also run a single prompt non-interactively:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+ANTHROPIC_API_KEY=your-localai-api-key \
+claude -p "list the files in /tmp" --model your-model-name
+```
+
+#### Configuration
+
+To avoid setting environment variables every time, you can add them to your shell profile (e.g., `~/.bashrc` or `~/.zshrc`):
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ANTHROPIC_API_KEY=your-localai-api-key
+```
+
+#### Verify available models
+
+Check which models are available in your LocalAI instance:
+
+```bash
+curl http://127.0.0.1:8080/v1/models
+```
+
+Use one of the listed model IDs as the `--model` argument.
+
+#### Notes
+
+- Models with tool calling support (e.g., Gemma 4, Qwen 3) work best, as Claude Code relies heavily on tool use for file operations and code editing.
+- Larger models generally produce better results for complex coding tasks.
+- The Anthropic Messages API endpoint supports both streaming and non-streaming modes.
 
 ### Charm Crush
 
