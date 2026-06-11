@@ -156,6 +156,7 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
             os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
             os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
             os.environ.setdefault("NO_TORCH_COMPILE", "1")
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
             # 2. Import torch (cuInit reads CUDA_VISIBLE_DEVICES here).
             import torch as _torch
@@ -186,6 +187,25 @@ class BackendServicer(backend_pb2_grpc.BackendServicer):
                 return tokenizer
 
             miso_generator.load_llama3_tokenizer = load_tokenizer
+
+            # Run the silentcipher watermarker on CPU: it's a small CNN, but
+            # its GPU inference buffers are what tip a 12GB card over the edge
+            # after the int8 backbone + Mimi are resident.
+            if bool(self.options.pop("watermark_on_cpu", True)):
+                original_load_watermarker = miso_generator.load_watermarker
+                original_watermark = miso_generator.watermark
+
+                def load_watermarker_cpu(device="cuda"):
+                    return original_load_watermarker(device="cpu")
+
+                def watermark_via_cpu(watermarker, audio, sample_rate, key):
+                    wm_audio, wm_sr = original_watermark(
+                        watermarker, audio.detach().to("cpu", torch.float32), sample_rate, key
+                    )
+                    return wm_audio, wm_sr
+
+                miso_generator.load_watermarker = load_watermarker_cpu
+                miso_generator.watermark = watermark_via_cpu
 
             # 4. Resolve model source and target device.
             source = request.ModelFile if request.ModelFile else None
